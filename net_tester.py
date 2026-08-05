@@ -544,20 +544,21 @@ class NetTesterGUI:
         self._convos = {}                # ckey -> [(direction, data, time), ...]
         self._convo_keys = []            # 联系人列表行对应的 ckey
         self._unread = {}                # ckey -> 未读条数
+        self._cstats = {}                # ckey -> [tx字节, tx包数, rx字节, rx包数]
+        self._crate = {}                 # ckey -> [时间, tx字节, rx字节]（速率基线）
+        self._drafts = {}                # ckey -> (输入框文本, HEX发送勾选)
         self.current_peer = None         # 当前选中的会话 ckey
         self._cli_cfg = {}               # CLI 参数（--open 建会话 & 对话框预填）
         self._last_visible = None        # 联系人列表变化检测缓存
 
-        # 统计
+        # 统计（全局总计；各会话的明细在 _cstats）
         self.tx_bytes = 0
         self.tx_pkts = 0
         self.rx_bytes = 0
         self.rx_pkts = 0
-        self._last_rate_t = time.monotonic()
-        self._last_tx = 0
-        self._last_rx = 0
 
         self._timer_job = None
+        self._loop_ckey = None           # 定时发送锁定的会话
 
         self._build_ui()
         # 按内容实际所需尺寸开窗（不同平台/字体下都不会裁掉控件）
@@ -574,22 +575,12 @@ class NetTesterGUI:
     def _build_ui(self):
         self._ui_font = "Segoe UI" if IS_WIN else "Noto Sans CJK SC"
 
-        # 底部状态栏：左=状态文字，右=统计+清零（先 pack，窗口变矮时优先保住）
+        # 底部状态栏：仅状态文字（统计已并入各会话）
         status = ttk.Frame(self.root, padding=(8, 3))
         status.pack(fill=tk.X, side=tk.BOTTOM)
         self.status_var = tk.StringVar(value="就绪")
         ttk.Label(status, textvariable=self.status_var, style="Status.TLabel",
                   anchor=tk.W).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(status, text="清零", width=4,
-                   command=self._reset_stats).pack(side=tk.RIGHT)
-        self.rate_lbl = ttk.Label(status, text="↑ 0 B/s ↓ 0 B/s")
-        self.rate_lbl.pack(side=tk.RIGHT, padx=(10, 6))
-        self.stats_rx_lbl = tk.Label(status, text="↓ 0 B / 0 包",
-                                     fg=PALETTE["green"], bg=PALETTE["bg"])
-        self.stats_rx_lbl.pack(side=tk.RIGHT, padx=6)
-        self.stats_tx_lbl = tk.Label(status, text="↑ 0 B / 0 包",
-                                     fg=PALETTE["accent"], bg=PALETTE["bg"])
-        self.stats_tx_lbl.pack(side=tk.RIGHT, padx=6)
 
         main = ttk.Frame(self.root, padding=6)
         main.pack(fill=tk.BOTH, expand=True)
@@ -658,10 +649,27 @@ class NetTesterGUI:
                                    command=lambda: self._send(random_pkt=True))
         self.rand_btn.pack(side=tk.LEFT, padx=10)
 
-        # —— 顶部：当前会话标题 + 显示选项工具条 ——
+        # —— 顶部：当前会话标题 + 会话统计行 + 显示选项工具条 ——
         self.convo_title = ttk.Label(conv_col, text="未选择会话",
                                      font=(self._ui_font, 11, "bold"))
         self.convo_title.pack(fill=tk.X, pady=(0, 2))
+
+        convo_stats_row = ttk.Frame(conv_col)
+        convo_stats_row.pack(fill=tk.X, pady=(0, 2))
+        self.convo_stats_tx = tk.Label(convo_stats_row, text="↑ 0 B / 0 包",
+                                       fg=PALETTE["accent"], bg=PALETTE["bg"],
+                                       font=(self._ui_font, 9))
+        self.convo_stats_tx.pack(side=tk.LEFT)
+        self.convo_stats_rx = tk.Label(convo_stats_row, text="↓ 0 B / 0 包",
+                                       fg=PALETTE["green"], bg=PALETTE["bg"],
+                                       font=(self._ui_font, 9))
+        self.convo_stats_rx.pack(side=tk.LEFT, padx=(10, 0))
+        self.convo_rate = ttk.Label(convo_stats_row, text="↑ 0 B/s ↓ 0 B/s",
+                                    font=(self._ui_font, 9),
+                                    foreground=PALETTE["subtle"])
+        self.convo_rate.pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Button(convo_stats_row, text="清零", width=4,
+                   command=self._reset_stats).pack(side=tk.RIGHT)
 
         rx_opt = ttk.Frame(conv_col)
         rx_opt.pack(fill=tk.X, pady=(0, 2))
@@ -900,10 +908,14 @@ class NetTesterGUI:
         """删除会话记录：清聊天记录并从列表移除（不影响通道）。"""
         self._convos.pop(ckey, None)
         self._unread.pop(ckey, None)
+        self._cstats.pop(ckey, None)
+        self._crate.pop(ckey, None)
+        self._drafts.pop(ckey, None)
         if self.current_peer == ckey:
             self.current_peer = None
             self._clear_view()
         self._refresh_contacts()
+        self._refresh_convo_stats()
         self.status_var.set(f"已删除会话 {self._display(ckey)}")
 
     def _cli_open(self):
@@ -1039,10 +1051,24 @@ class NetTesterGUI:
         self._select_convo(self._convo_keys[sel[0]])
 
     def _select_convo(self, peer: str):
+        old = self.current_peer
+        if old != peer:
+            # 切换会话才动草稿：保存旧会话的（输入文本 + HEX 勾选），
+            # 恢复新会话的；重复选中同一会话时保持输入框原样
+            if old is not None:
+                self._drafts[old] = (
+                    self.tx_text.get("1.0", tk.END).rstrip("\n"),
+                    self.tx_hex_var.get())
+            text, hex_on = self._drafts.get(peer, ("", False))
+            self.tx_text.delete("1.0", tk.END)
+            if text:
+                self.tx_text.insert("1.0", text)
+            self.tx_hex_var.set(hex_on)
         self.current_peer = peer
         self._unread.pop(peer, None)
         self._refresh_contacts()
         self._render_chat(peer)
+        self._refresh_convo_stats()
 
     @staticmethod
     def _port_owner_hint(port: str) -> str:
@@ -1091,6 +1117,9 @@ class NetTesterGUI:
                     self.rx_bytes += len(b)
                     self.rx_pkts += 1
                     ckey = f"{cid}|{a}"
+                    st = self._cstats.setdefault(ckey, [0, 0, 0, 0])
+                    st[2] += len(b)
+                    st[3] += 1
                     if self._ensure_convo(ckey):
                         self._refresh_contacts()
                     self._store_msg(ckey, "rx", b)
@@ -1203,8 +1232,8 @@ class NetTesterGUI:
             return parse_hex(text)
         return text.encode("utf-8")
 
-    def _send(self, random_pkt: bool) -> bool:
-        ckey = self.current_peer
+    def _send(self, random_pkt: bool, ckey: str = None) -> bool:
+        ckey = ckey or self.current_peer
         if ckey is None:
             self.status_var.set("请先添加或选择一个会话")
             return False
@@ -1257,9 +1286,13 @@ class NetTesterGUI:
             return False
         self.tx_bytes += len(payload) * n
         self.tx_pkts += n
+        st = self._cstats.setdefault(ckey, [0, 0, 0, 0])
+        st[0] += len(payload) * n
+        st[1] += n
         self._ensure_convo(ckey)
         self._store_msg(ckey, "tx", payload)
-        self._append_msgs([("msg", "tx", ckey, payload, time.time())])
+        if ckey == self.current_peer:       # 定时发送可能锁定在非当前会话
+            self._append_msgs([("msg", "tx", ckey, payload, time.time())])
         tag = "随机包" if random_pkt else "数据"
         self.status_var.set(f"已发送{tag} {len(payload)} 字节"
                             + (f" × {n}" if n > 1 else ""))
@@ -1272,13 +1305,18 @@ class NetTesterGUI:
             self.root.after_cancel(self._timer_job)
             self._timer_job = None
         if self.loop_var.get():
+            self._loop_ckey = self.current_peer   # 锁定会话，切换不影响发送目标
             self._loop_tick()
+        else:
+            self._loop_ckey = None
 
     def _loop_tick(self):
         if not self.loop_var.get():
             return
-        if not self._send(random_pkt=self.loop_rand_var.get()):
+        if not self._send(random_pkt=self.loop_rand_var.get(),
+                          ckey=self._loop_ckey):
             self.loop_var.set(False)   # 发送失败自动停止
+            self._loop_ckey = None
             return
         try:
             interval = max(10, int(self.loop_ms.get()))
@@ -1286,33 +1324,45 @@ class NetTesterGUI:
             interval = 1000
         self._timer_job = self.root.after(interval, self._loop_tick)
 
-    # ---------------- 统计 ----------------
+    # ---------------- 统计（按会话） ----------------
+
+    def _refresh_convo_stats(self):
+        """刷新聊天区顶部的当前会话统计行（速率由 _update_stats 每秒刷）。"""
+        tx_b, tx_p, rx_b, rx_p = self._cstats.get(
+            self.current_peer, (0, 0, 0, 0))
+        self.convo_stats_tx.config(text=f"↑ {pretty_bytes(tx_b)} / {tx_p} 包")
+        self.convo_stats_rx.config(text=f"↓ {pretty_bytes(rx_b)} / {rx_p} 包")
 
     def _reset_stats(self):
+        """清零按钮：只清当前会话的统计；内部全局总计一并归零。"""
         self.tx_bytes = self.tx_pkts = self.rx_bytes = self.rx_pkts = 0
-        self._last_tx = self._last_rx = 0
+        ckey = self.current_peer
+        if ckey is not None:
+            self._cstats[ckey] = [0, 0, 0, 0]
+            self._crate.pop(ckey, None)
+        self._refresh_convo_stats()
+        self.convo_rate.config(text="↑ 0 B/s ↓ 0 B/s")
 
     def _update_stats(self):
         now = time.monotonic()
-        dt = now - self._last_rate_t
+        ckey = self.current_peer
+        tx_b, _tx_p, rx_b, _rx_p = self._cstats.get(ckey, (0, 0, 0, 0))
+        base = self._crate.setdefault(ckey, [now, tx_b, rx_b])
+        dt = now - base[0]
         if dt >= 1.0:
-            tx_rate = (self.tx_bytes - self._last_tx) / dt
-            rx_rate = (self.rx_bytes - self._last_rx) / dt
-            self.rate_lbl.config(
+            tx_rate = (tx_b - base[1]) / dt
+            rx_rate = (rx_b - base[2]) / dt
+            self.convo_rate.config(
                 text=f"↑ {pretty_bytes(tx_rate)}/s ↓ {pretty_bytes(rx_rate)}/s")
-            self._last_rate_t = now
-            self._last_tx = self.tx_bytes
-            self._last_rx = self.rx_bytes
-        self.stats_tx_lbl.config(
-            text=f"↑ {pretty_bytes(self.tx_bytes)} / {self.tx_pkts} 包")
-        self.stats_rx_lbl.config(
-            text=f"↓ {pretty_bytes(self.rx_bytes)} / {self.rx_pkts} 包")
+            base[0], base[1], base[2] = now, tx_b, rx_b
+        self._refresh_convo_stats()
         self.root.after(500, self._update_stats)
 
     # ---------------- 退出 ----------------
 
     def _on_close(self):
         self.loop_var.set(False)
+        self._loop_ckey = None
         if self._timer_job:
             self.root.after_cancel(self._timer_job)
         for w in self.channels.values():

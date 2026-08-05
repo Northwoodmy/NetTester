@@ -97,11 +97,36 @@ def phase2():
     # 会话里应同时有 rx 和 tx 气泡记录
     dirs = [m[0] for m in gui._convos[PEER]]
     assert dirs.count("rx") >= 3 and "tx" in dirs, f"会话消息记录不完整: {dirs}"
+    # 会话级统计：PEER 已发 3 收 >=3；群发会话没发过
+    st = gui._cstats[PEER]
+    assert st[1] == 3 and st[3] >= 3, f"PEER 会话统计不正确: {st}"
+    assert gui._cstats.get(GROUP, [0, 0, 0, 0])[1] == 0, "群发会话不应有发送统计"
     # 逗号分隔一次添加多个目标（127/8 全回本机，发送必成功但无人应答）
     assert gui._create_session("udp", "127.0.0.1", "19099",
                                "127.0.0.2, 127.0.0.3", "6000")
     assert f"{CID}|127.0.0.2:6000" in gui._convo_keys, "批量目标 1 未添加"
     assert gui.current_peer == f"{CID}|127.0.0.3:6000", "应选中最后添加的目标"
+    # 发送草稿按会话隔离（文本 + HEX 勾选）
+    k3 = f"{CID}|127.0.0.3:6000"
+    # 先把 PEER 的草稿清成已知空白状态（前面 HEX 发送留下过内容）
+    gui._select_convo(PEER)
+    gui.tx_text.delete("1.0", tk.END)
+    gui.tx_hex_var.set(False)
+    gui._select_convo(k3)
+    gui.tx_text.delete("1.0", tk.END)
+    gui.tx_text.insert("1.0", "draft-A")
+    gui.tx_hex_var.set(True)
+    gui._select_convo(PEER)
+    assert gui.tx_text.get("1.0", tk.END).strip() == "" \
+        and not gui.tx_hex_var.get(), "切到空白草稿会话应为空白"
+    gui.tx_text.insert("1.0", "draft-B")
+    gui._select_convo(k3)
+    assert gui.tx_text.get("1.0", tk.END).strip() == "draft-A" \
+        and gui.tx_hex_var.get(), "切回应恢复 draft-A 与 HEX 勾选"
+    gui._select_convo(PEER)
+    assert gui.tx_text.get("1.0", tk.END).strip() == "draft-B" \
+        and not gui.tx_hex_var.get(), "PEER 的草稿应为 draft-B"
+    gui.tx_text.delete("1.0", tk.END)   # 清理，避免影响后续阶段
     # 通道内群发：向 3 个已知来源各发一份
     gui._select_convo(GROUP)
     gui._reset_stats()
@@ -112,6 +137,9 @@ def phase2():
 def phase3():
     assert gui.tx_pkts == 3, f"群发应向 3 个目标各发 1 包，实际 {gui.tx_pkts}"
     assert gui.rx_pkts == 1, f"群发只有本机回 1 包，实际 {gui.rx_pkts}"
+    # 群发统计记在群发会话上，收包记在对端会话上
+    assert gui._cstats[GROUP][1] == 3, f"群发统计应记 3 包: {gui._cstats[GROUP]}"
+    assert gui._cstats[PEER][3] >= 1, "自收的包应记在 PEER 会话"
     # 勾选"忽略本机来源"后，自发自收应被过滤掉
     gui._select_convo(PEER)
     gui.rx_ignore_local_var.set(True)
@@ -148,6 +176,34 @@ def phase5():
     tcp_rx = b"".join(d for dr, d, _ in gui._convos[TCP_CKEY] if dr == "rx")
     assert b"echo:hello tcp" in tcp_rx, f"TCP 会话应收到 echo: {tcp_rx!r}"
     assert len(gui.channels) == 3, f"应 3 通道并存: {list(gui.channels)}"
+    root.after(200, phase5b)
+
+
+TCP_TX0 = 0     # 循环测试前 TCP 会话的累计发送包数
+
+
+def phase5b():
+    # 定时发送锁定会话：在 PEER 上启动循环后立刻切到 TCP 会话，
+    # 循环包应仍发往 PEER，而不是跟着当前选中会话跑
+    global TCP_TX0
+    TCP_TX0 = gui._cstats[TCP_CKEY][1]
+    gui._select_convo(PEER)
+    gui.loop_ms.delete(0, tk.END)
+    gui.loop_ms.insert(0, "50")
+    gui.loop_var.set(True)
+    gui._toggle_loop()
+    assert gui._loop_ckey == PEER, "循环应锁定启动时的会话"
+    gui._select_convo(TCP_CKEY)
+    root.after(350, phase5c)
+
+
+def phase5c():
+    gui.loop_var.set(False)
+    gui._toggle_loop()
+    assert gui._loop_ckey is None, "停止循环后应解除锁定"
+    assert gui._cstats[PEER][1] >= 3, \
+        f"循环包应发往锁定的 PEER: {gui._cstats[PEER]}"
+    assert gui._cstats[TCP_CKEY][1] == TCP_TX0, "切走后 TCP 会话不应收到循环包"
     # 切回 UDP 会话，第一个通道仍能自发自收
     gui._select_convo(PEER)
     gui._reset_stats()
