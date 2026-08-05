@@ -140,6 +140,10 @@ def phase3():
     # 群发统计记在群发会话上，收包记在对端会话上
     assert gui._cstats[GROUP][1] == 3, f"群发统计应记 3 包: {gui._cstats[GROUP]}"
     assert gui._cstats[PEER][3] >= 1, "自收的包应记在 PEER 会话"
+    # 「清空」按钮：同时清聊天记录和统计
+    gui._clear_convo()
+    assert gui._convos[GROUP] == [] and gui._cstats[GROUP] == [0, 0, 0, 0], \
+        "清空应同时清记录与统计"
     # 勾选"忽略本机来源"后，自发自收应被过滤掉
     gui._select_convo(PEER)
     gui.rx_ignore_local_var.set(True)

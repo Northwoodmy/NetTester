@@ -670,8 +670,8 @@ class NetTesterGUI:
                                     font=(self._ui_font, 9),
                                     foreground=PALETTE["subtle"])
         self.convo_rate.pack(side=tk.LEFT, padx=(10, 0))
-        ttk.Button(convo_stats_row, text="清零", width=4,
-                   command=self._reset_stats).pack(side=tk.RIGHT)
+        ttk.Button(convo_stats_row, text="清空", width=4,
+                   command=self._clear_convo).pack(side=tk.RIGHT)
 
         rx_opt = ttk.Frame(conv_col)
         rx_opt.pack(fill=tk.X, pady=(0, 2))
@@ -687,7 +687,6 @@ class NetTesterGUI:
         ttk.Checkbutton(rx_opt, text="忽略本机来源",
                         variable=self.rx_ignore_local_var,
                         command=self._refresh_ignore_cache).pack(side=tk.LEFT, padx=6)
-        ttk.Button(rx_opt, text="清空", command=self._clear_rx).pack(side=tk.RIGHT)
 
         # —— 中间气泡聊天记录 ——
         self.rx_text = scrolledtext.ScrolledText(
@@ -1229,10 +1228,17 @@ class NetTesterGUI:
         self.rx_text.config(state=tk.DISABLED)
 
     def _clear_rx(self):
-        """清空按钮：清掉当前会话的聊天记录和视图。"""
+        """清掉当前会话的聊天记录和视图。"""
         if self.current_peer in self._convos:
             self._convos[self.current_peer].clear()
         self._clear_view()
+
+    def _clear_convo(self):
+        """「清空」按钮：清掉当前会话的聊天记录 + 统计。"""
+        self._clear_rx()
+        self._reset_stats()
+        if self.current_peer is not None:
+            self.status_var.set("已清空当前会话的记录与统计")
 
     # ---------------- 发送 ----------------
 
