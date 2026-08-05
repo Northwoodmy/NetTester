@@ -10,17 +10,19 @@ root = tk.Tk()
 apply_modern_theme(root)          # 顺带验证主题样式代码不报错
 gui = NetTesterGUI(root)
 
-# 切到 UDP，本地与目标都指向 127.0.0.1:19099（自发自收）
+# 切到 UDP，本地绑 127.0.0.1:19099，再主动添加自己为会话目标（自发自收）
 gui.mode_var.set("UDP")
 gui._on_mode_change()
-for entry, val in ((gui.local_host, "127.0.0.1"), (gui.local_port, "19099"),
-                   (gui.remote_host, "127.0.0.1"), (gui.remote_port, "19099")):
+for entry, val in ((gui.local_host, "127.0.0.1"), (gui.local_port, "19099")):
     entry.delete(0, tk.END)
     entry.insert(0, val)
 
 assert gui._toggle_open.__name__ == "_toggle_open"
 gui._toggle_open()                      # 打开 UDP
 assert gui.worker is not None, "UDP worker 未打开"
+gui.new_peer.insert(0, "127.0.0.1:19099")
+gui._add_target()
+assert gui.current_peer == "127.0.0.1:19099", "添加目标后应选中该会话"
 
 # 发送 256 字节随机包
 gui.rand_size.delete(0, tk.END)
@@ -48,13 +50,12 @@ def phase2():
     peer = "127.0.0.1:19099"
     assert peer in gui._convo_keys, f"联系人列表未更新: {gui._convo_keys}"
     assert gui.current_peer == peer, f"首个会话应自动选中，实际 {gui.current_peer}"
-    # 点选联系人 -> 填入目标地址栏
+    # 点选联系人 -> 切换当前会话
     idx = gui._convo_keys.index(peer)
     gui.contact_list.selection_clear(0, tk.END)
     gui.contact_list.selection_set(idx)
     gui._on_contact_pick()
-    assert gui.remote_host.get() == "127.0.0.1" and gui.remote_port.get() == "19099", \
-        "点选联系人未填入目标地址"
+    assert gui.current_peer == peer, "点选联系人未切换会话"
     # 会话里应同时有 rx 和 tx 气泡记录
     dirs = [m[0] for m in gui._convos[peer]]
     assert dirs.count("rx") >= 3 and "tx" in dirs, f"会话消息记录不完整: {dirs}"
@@ -66,7 +67,6 @@ def phase2():
     assert "127.0.0.2:6000" in gui._convo_keys and "127.0.0.3:6000" in gui._convo_keys, \
         f"主动添加目标失败: {gui._convo_keys}"
     assert gui.current_peer == "127.0.0.3:6000", "添加后应选中最后添加的目标"
-    assert gui.remote_host.get() == "127.0.0.3" and gui.remote_port.get() == "6000"
     # 群发：选中"（所有已知来源）"发随机包 -> 向 3 个已知来源各发一份
     gui._select_convo("（所有已知来源）")
     assert gui.current_peer == "（所有已知来源）"

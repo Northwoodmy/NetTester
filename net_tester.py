@@ -513,6 +513,7 @@ class NetTesterGUI:
         self._unread = {}                # peer -> 未读条数
         self.current_peer = None         # 当前选中的会话（特殊会话见 _special_peer）
         self._server_peer = None         # TCP Client 的对端（服务器地址）
+        self._pending_target = None      # CLI --remote-* 指定的、待建成会话的目标
         self._last_visible = None        # TCP Server 联系人列表变化检测缓存
 
         # 统计
@@ -571,7 +572,8 @@ class NetTesterGUI:
         self.local_port.insert(0, "9000")
         self.local_port.grid(row=3, column=1, sticky=tk.W, padx=(4, 0))
 
-        ttk.Label(left, text="目标地址").grid(row=4, column=0, sticky=tk.W, pady=2)
+        self.remote_lbl = ttk.Label(left, text="目标地址")
+        self.remote_lbl.grid(row=4, column=0, sticky=tk.W, pady=2)
         self.remote_host = ttk.Entry(left, width=12)
         self.remote_host.insert(0, "127.0.0.1")
         self.remote_host.grid(row=5, column=0, sticky=tk.EW, pady=2)
@@ -731,11 +733,14 @@ class NetTesterGUI:
         mode = self.mode_var.get()
         is_server = mode == "TCP Server"
         is_client = mode == "TCP Client"
-        # 服务器不需要目标地址；客户端不需要本地地址
+        # 本地地址仅 TCP Client 不需要；目标地址仅 TCP Client 需要
+        # （UDP 的发送目标由会话联系人决定，Server 不需要目标）
         for w in (self.local_host, self.local_port):
             w.config(state=tk.DISABLED if is_client else tk.NORMAL)
         for w in (self.remote_host, self.remote_port):
-            w.config(state=tk.DISABLED if is_server else tk.NORMAL)
+            w.config(state=tk.NORMAL)
+        for w in (self.remote_lbl, self.remote_host, self.remote_port):
+            w.grid() if is_client else w.grid_remove()
         self.open_btn.config(text={"TCP Server": "开始监听", "TCP Client": "连接",
                                    "UDP": "打开"}[mode])
         # 「发起新会话」行只在 UDP 模式有意义（TCP 对端由连接决定）
@@ -832,15 +837,6 @@ class NetTesterGUI:
         self.current_peer = peer
         self._unread.pop(peer, None)
         self._refresh_contacts()
-        # UDP 点选联系人 -> 填入目标地址栏
-        if self.mode_var.get() == "UDP" and peer != self._special_peer():
-            m = re.match(r"^(\d+\.\d+\.\d+\.\d+):(\d+)$", peer)
-            if m:
-                for entry, val in ((self.remote_host, m.group(1)),
-                                   (self.remote_port, m.group(2))):
-                    entry.config(state=tk.NORMAL)
-                    entry.delete(0, tk.END)
-                    entry.insert(0, val)
         self._render_chat(peer)
 
     def _toggle_open(self):
@@ -887,8 +883,13 @@ class NetTesterGUI:
         elif mode == "TCP Server":
             self.current_peer = self._special_peer()
             self._ensure_convo(self.current_peer)
-        elif self.current_peer is None and self._peers:
-            self.current_peer = self._peers[0]
+        elif mode == "UDP":
+            if self._pending_target:      # CLI --remote-* 指定的目标，建成会话
+                self._ensure_convo(self._pending_target)
+                self.current_peer = self._pending_target
+                self._pending_target = None
+            elif self.current_peer is None and self._peers:
+                self.current_peer = self._peers[0]
         self._refresh_contacts()
         if self.current_peer is not None:
             self._render_chat(self.current_peer)
@@ -1103,13 +1104,16 @@ class NetTesterGUI:
                         self._log_event(f"以下目标发送失败: {'、'.join(failed)}")
                     conv = self._special_peer()
                 else:
-                    # 单发：以目标地址栏为准（手改后自动切到对应会话）
-                    h = self.remote_host.get().strip()
-                    pt = int(self.remote_port.get())
-                    self.worker.target = (h, pt)
+                    # 单发：目标 = 当前会话的对端地址
+                    peer = self.current_peer
+                    m = peer and re.match(r"^(\d+\.\d+\.\d+\.\d+):(\d+)$", peer)
+                    if not m:
+                        self.status_var.set("请先添加或选择一个目标会话")
+                        return False
+                    self.worker.target = (m.group(1), int(m.group(2)))
                     self.worker.send(payload)
                     n = 1
-                    conv = f"{h}:{pt}"
+                    conv = peer
             else:   # TCP Client：唯一对端是服务器
                 self.worker.send(payload)
                 n = 1
@@ -1214,6 +1218,9 @@ def main():
         set_entry(gui.remote_host, args.remote_host)
     if args.remote_port:
         set_entry(gui.remote_port, args.remote_port)
+    if args.remote_host and args.remote_port and args.mode == "UDP":
+        # UDP 无目标地址栏，CLI 目标在打开时自动建成会话
+        gui._pending_target = f"{args.remote_host}:{args.remote_port}"
     if args.open:
         root.after(100, gui._open_worker)
     root.mainloop()
