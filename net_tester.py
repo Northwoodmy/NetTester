@@ -35,6 +35,7 @@ except ModuleNotFoundError:                 # 允许无 GUI 环境仅使用网�
 UDP_MAX_PAYLOAD = 65507          # UDP 数据报最大载荷
 RECV_BUF = 65536
 MAX_RX_LINES = 2000              # 接收区最大行数，超出裁剪
+MAX_CONVO_MSGS = 2000            # 每个会话最多保存的消息条数
 MONO_FONT = "Consolas" if sys.platform == "win32" else "Monospace"
 IS_WIN = sys.platform == "win32"
 
@@ -506,6 +507,14 @@ class NetTesterGUI:
         self._peers = []                 # UDP 模式下见过的来源地址
         self._local_ips = set()          # 本机 IP 缓存（"忽略本机来源"用）
 
+        # 会话（类微信：每个对端地址 = 一个联系人，各自一份聊天记录）
+        self._convos = {}                # peer -> [(direction, data, time), ...]
+        self._convo_keys = []            # 联系人列表行对应的 peer key
+        self._unread = {}                # peer -> 未读条数
+        self.current_peer = None         # 当前选中的会话（特殊会话见 _special_peer）
+        self._server_peer = None         # TCP Client 的对端（服务器地址）
+        self._last_visible = None        # TCP Server 联系人列表变化检测缓存
+
         # 统计
         self.tx_bytes = 0
         self.tx_pkts = 0
@@ -574,28 +583,20 @@ class NetTesterGUI:
                                    command=self._toggle_open)
         self.open_btn.grid(row=6, column=0, columnspan=2, sticky=tk.EW, pady=(8, 2))
 
-        self.client_lbl = ttk.Label(left, text="连接列表")
-        self.client_lbl.grid(row=7, column=0, sticky=tk.W, pady=2)
-        self.client_var = tk.StringVar(value="所有连接")
-        self.client_box = ttk.Combobox(left, textvariable=self.client_var,
-                                       state="readonly", values=["所有连接"], width=16)
-        self.client_box.grid(row=8, column=0, columnspan=2, sticky=tk.EW, pady=2)
-        self.client_box.bind("<<ComboboxSelected>>", self._on_client_pick)
-
-        ttk.Separator(left).grid(row=9, column=0, columnspan=2, sticky=tk.EW, pady=8)
+        ttk.Separator(left).grid(row=7, column=0, columnspan=2, sticky=tk.EW, pady=8)
 
         self.stats_tx_lbl = tk.Label(left, text="发送: 0 B / 0 包",
                                      fg=PALETTE["accent"], bg=PALETTE["bg"],
                                      anchor=tk.W, justify=tk.LEFT)
-        self.stats_tx_lbl.grid(row=10, column=0, columnspan=2, sticky=tk.W, pady=2)
+        self.stats_tx_lbl.grid(row=8, column=0, columnspan=2, sticky=tk.W, pady=2)
         self.stats_rx_lbl = tk.Label(left, text="接收: 0 B / 0 包",
                                      fg=PALETTE["green"], bg=PALETTE["bg"],
                                      anchor=tk.W, justify=tk.LEFT)
-        self.stats_rx_lbl.grid(row=11, column=0, columnspan=2, sticky=tk.W, pady=2)
+        self.stats_rx_lbl.grid(row=9, column=0, columnspan=2, sticky=tk.W, pady=2)
         self.rate_lbl = ttk.Label(left, text="速率 ↑ 0 B/s  ↓ 0 B/s")
-        self.rate_lbl.grid(row=12, column=0, columnspan=2, sticky=tk.W, pady=2)
+        self.rate_lbl.grid(row=10, column=0, columnspan=2, sticky=tk.W, pady=2)
         ttk.Button(left, text="统计清零", command=self._reset_stats).grid(
-            row=13, column=0, columnspan=2, sticky=tk.EW, pady=(4, 0))
+            row=11, column=0, columnspan=2, sticky=tk.EW, pady=(4, 0))
 
         left.columnconfigure(0, weight=1)
 
@@ -608,21 +609,51 @@ class NetTesterGUI:
                                   style="Orange.TLabelframe")
         tx_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(6, 0))
 
-        # 接收区
-        rx_frame = ttk.LabelFrame(right, text=" 接收 ", padding=4,
+        # 会话区（类微信：左联系人列表，右气泡聊天记录）
+        rx_frame = ttk.LabelFrame(right, text=" 会话 ", padding=4,
                                   style="Green.TLabelframe")
         rx_frame.pack(fill=tk.BOTH, expand=True)
-        self.rx_text = scrolledtext.ScrolledText(rx_frame, state=tk.DISABLED,
-                                                 font=(MONO_FONT, 10), wrap=tk.NONE,
-                                                 height=12, **TEXT_STYLE)
+
+        chat_box = ttk.Frame(rx_frame)
+        chat_box.pack(fill=tk.BOTH, expand=True)
+        self.contact_list = tk.Listbox(
+            chat_box, width=20, bg="#FFFFFF", fg=PALETTE["fg"],
+            selectbackground=PALETTE["select"],
+            selectforeground=PALETTE["accent_press"],
+            relief="flat", highlightthickness=1,
+            highlightbackground=PALETTE["border"],
+            highlightcolor=PALETTE["accent"],
+            activestyle="none", exportselection=False)
+        self.contact_list.pack(side=tk.LEFT, fill=tk.Y)
+        self.contact_list.bind("<<ListboxSelect>>", self._on_contact_pick)
+        ttk.Separator(chat_box, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y)
+
+        self.rx_text = scrolledtext.ScrolledText(
+            chat_box, state=tk.DISABLED, font=(MONO_FONT, 10), wrap=tk.CHAR,
+            height=12, **{**TEXT_STYLE, "bg": "#F5F5F5"})
         self.rx_text.pack(fill=tk.BOTH, expand=True)
+        ui_font = "Segoe UI" if IS_WIN else "Noto Sans CJK SC"
+        t = self.rx_text
+        # 气泡：收到=左白，发出=右绿（微信配色）；meta=灰小字；sys=居中灰字
+        t.tag_configure("rx", background="#FFFFFF", lmargin1=6, lmargin2=6,
+                        rmargin=90, justify=tk.LEFT, spacing3=2)
+        t.tag_configure("tx", background="#95EC69", lmargin1=90, rmargin=6,
+                        justify=tk.RIGHT, spacing3=2)
+        t.tag_configure("rx_meta", foreground="#9AA0A6", font=(ui_font, 8),
+                        lmargin1=6, justify=tk.LEFT, spacing1=8)
+        t.tag_configure("tx_meta", foreground="#9AA0A6", font=(ui_font, 8),
+                        rmargin=6, justify=tk.RIGHT, spacing1=8)
+        t.tag_configure("sys", foreground="#9AA0A6", font=(ui_font, 8),
+                        justify=tk.CENTER, spacing1=6)
 
         rx_opt = ttk.Frame(rx_frame)
         rx_opt.pack(fill=tk.X, pady=(4, 0))
         self.rx_hex_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(rx_opt, text="HEX 显示", variable=self.rx_hex_var).pack(side=tk.LEFT)
+        ttk.Checkbutton(rx_opt, text="HEX 显示", variable=self.rx_hex_var,
+                        command=self._rerender).pack(side=tk.LEFT)
         self.rx_ts_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(rx_opt, text="时间戳", variable=self.rx_ts_var).pack(side=tk.LEFT, padx=6)
+        ttk.Checkbutton(rx_opt, text="时间戳", variable=self.rx_ts_var,
+                        command=self._rerender).pack(side=tk.LEFT, padx=6)
         self.rx_pause_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(rx_opt, text="暂停显示", variable=self.rx_pause_var).pack(side=tk.LEFT)
         self.rx_ignore_local_var = tk.BooleanVar(value=False)
@@ -690,41 +721,79 @@ class NetTesterGUI:
             w.config(state=tk.DISABLED if is_server else tk.NORMAL)
         self.open_btn.config(text={"TCP Server": "开始监听", "TCP Client": "连接",
                                    "UDP": "打开"}[mode])
-        if is_server:
-            self.client_lbl.config(text="连接列表")
-            self.client_box.config(state="readonly", values=["所有连接"])
-            self.client_var.set("所有连接")
-        elif mode == "UDP":
-            # UDP 无连接，此框复用为"见过的来源地址"，点选即填入目标地址
-            self.client_lbl.config(text="来源列表")
-            self.client_box.config(state="readonly",
-                                   values=["（手动目标）"] + self._peers)
-            self.client_var.set("（手动目标）")
-        else:
-            self.client_lbl.config(text="连接列表")
-            self.client_box.config(state=tk.DISABLED, values=[])
-            self.client_var.set("")
+        # 切换模式清空会话（不同模式的对端不混用）
+        self._convos.clear()
+        self._peers.clear()
+        self._unread.clear()
+        self._server_peer = None
+        self.current_peer = None
+        self._clear_view()
+        self._refresh_contacts()
 
-    def _on_client_pick(self, _event=None):
-        """UDP 模式：点选来源地址 -> 填入目标地址栏。"""
-        if self.mode_var.get() != "UDP":
-            return
-        m = re.match(r"^(\d+\.\d+\.\d+\.\d+):(\d+)$", self.client_var.get())
-        if m:
-            for entry, val in ((self.remote_host, m.group(1)),
-                               (self.remote_port, m.group(2))):
-                entry.delete(0, tk.END)
-                entry.insert(0, val)
-            self.status_var.set(f"目标已设为 {m.group(0)}")
+    # ---------------- 会话（联系人）管理 ----------------
 
-    def _add_peer(self, addr: str):
-        if addr in self._peers:
+    def _special_peer(self):
+        """群发用的特殊会话名；TCP Client 没有。"""
+        return {"UDP": "（所有已知来源）",
+                "TCP Server": "（所有连接）"}.get(self.mode_var.get())
+
+    def _visible_peers(self):
+        """当前应显示在联系人列表里的对端（不含特殊项）。"""
+        mode = self.mode_var.get()
+        if mode == "UDP":
+            return list(self._peers)
+        if mode == "TCP Server":
+            keys = self.worker.client_keys() if self.worker else []
+            hist = [k for k in self._convos if k != self._special_peer()]
+            return sorted(set(keys) | set(hist))
+        return [self._server_peer] if self._server_peer else []
+
+    def _refresh_contacts(self):
+        """重建联系人列表：特殊项（群发）在前，保持当前选中态。"""
+        special = self._special_peer()
+        keys = ([special] if special else []) + self._visible_peers()
+        self._convo_keys = keys
+        self.contact_list.delete(0, tk.END)
+        for k in keys:
+            n = self._unread.get(k, 0)
+            self.contact_list.insert(tk.END, f"{k}  [{n}]" if n else k)
+        if self.current_peer in keys:
+            idx = keys.index(self.current_peer)
+            self.contact_list.selection_set(idx)
+            self.contact_list.see(idx)
+
+    def _ensure_convo(self, peer: str) -> bool:
+        """确保会话存在；UDP 下来源同时进 peers 列表。返回是否新建。"""
+        is_new = peer not in self._convos
+        self._convos.setdefault(peer, [])
+        if self.mode_var.get() == "UDP" and peer != self._special_peer() \
+                and peer not in self._peers:
+            self._peers.append(peer)
+            if len(self._peers) > 50:
+                self._peers = self._peers[-50:]
+            is_new = True
+        return is_new
+
+    def _on_contact_pick(self, _event=None):
+        sel = self.contact_list.curselection()
+        if not sel or sel[0] >= len(self._convo_keys):
             return
-        self._peers.append(addr)
-        if len(self._peers) > 50:
-            self._peers = self._peers[-50:]
-        if self.mode_var.get() == "UDP":
-            self.client_box.config(values=["（手动目标）"] + self._peers)
+        self._select_convo(self._convo_keys[sel[0]])
+
+    def _select_convo(self, peer: str):
+        self.current_peer = peer
+        self._unread.pop(peer, None)
+        self._refresh_contacts()
+        # UDP 点选联系人 -> 填入目标地址栏
+        if self.mode_var.get() == "UDP" and peer != self._special_peer():
+            m = re.match(r"^(\d+\.\d+\.\d+\.\d+):(\d+)$", peer)
+            if m:
+                for entry, val in ((self.remote_host, m.group(1)),
+                                   (self.remote_port, m.group(2))):
+                    entry.config(state=tk.NORMAL)
+                    entry.delete(0, tk.END)
+                    entry.insert(0, val)
+        self._render_chat(peer)
 
     def _toggle_open(self):
         if self.worker:
@@ -761,6 +830,22 @@ class NetTesterGUI:
         self.open_btn.config(text="关闭")
         self.mode_box.config(state=tk.DISABLED)
         self._refresh_ignore_cache()
+        # 按模式初始化会话
+        self._convos.clear()
+        self._peers.clear()
+        self._unread.clear()
+        self._server_peer = None
+        self.current_peer = None
+        if mode == "TCP Client":
+            self._server_peer = f"{self.remote_host.get().strip()}:" \
+                                f"{int(self.remote_port.get())}"
+            self._ensure_convo(self._server_peer)
+            self.current_peer = self._server_peer
+        elif mode == "TCP Server":
+            self.current_peer = self._special_peer()
+            self._ensure_convo(self.current_peer)
+        self._clear_view()
+        self._refresh_contacts()
         self.status_var.set(f"{mode} 运行中")
 
     @staticmethod
@@ -794,6 +879,12 @@ class NetTesterGUI:
         self.open_btn.config(text="打开")
         self.mode_box.config(state="readonly")
         self._peers.clear()
+        self._convos.clear()
+        self._unread.clear()
+        self._server_peer = None
+        self.current_peer = None
+        self._clear_view()
+        self._refresh_contacts()
         self._on_mode_change()
         self.status_var.set("已关闭")
         self._log_event("--- 连接已关闭 ---")
@@ -812,7 +903,7 @@ class NetTesterGUI:
             self._local_ips = set(detect_local_ips()) | {"127.0.0.1"}
 
     def _poll_queue(self):
-        buf = []                       # 批量拼接，每 50ms 只插一次，抗高包速
+        appends = []                   # 批量渲染，每 50ms 只刷一次，抗高包速
         try:
             while True:
                 kind, a, b = self.msg_queue.get_nowait()
@@ -822,56 +913,103 @@ class NetTesterGUI:
                         continue     # 忽略本机发出的包（广播自发自收等场景）
                     self.rx_bytes += len(b)
                     self.rx_pkts += 1
-                    if isinstance(self.worker, UDPWorker):
-                        self._add_peer(a)
-                    if not self.rx_pause_var.get():
-                        buf.append(self._fmt_rx(a, b))
+                    if self._ensure_convo(a):
+                        self._refresh_contacts()
+                    self._store_msg(a, "rx", b)
+                    if self.current_peer is None:
+                        self._select_convo(a)      # 第一个会话自动选中
+                    if a == self.current_peer:
+                        if not self.rx_pause_var.get():
+                            appends.append(("msg", "rx", a, b, time.time()))
+                    else:
+                        self._unread[a] = self._unread.get(a, 0) + 1
+                        self._refresh_contacts()
                 else:
                     self.status_var.set(a)
-                    buf.append(self._fmt_event(a))
+                    appends.append(("sys", f"* {a}"))
         except queue.Empty:
             pass
-        if buf:
-            self._append_rx("".join(buf))
+        if appends:
+            self._append_msgs(appends)
         if isinstance(self.worker, TCPServerWorker):
-            self._refresh_client_list(self.worker.client_keys())
+            vis = tuple(self._visible_peers())
+            if vis != self._last_visible:        # 客户端接入/断开
+                self._last_visible = vis
+                self._refresh_contacts()
         self.root.after(50, self._poll_queue)
 
-    def _ts(self):
-        return time.strftime("[%H:%M:%S") + f".{int(time.time() * 1000) % 1000:03d}] " \
-            if self.rx_ts_var.get() else ""
+    # ---------------- 会话消息存储与气泡渲染 ----------------
 
-    def _fmt_rx(self, source: str, data: bytes):
-        body = format_hex(data) if self.rx_hex_var.get() else data.decode("utf-8", "replace")
-        return f"{self._ts()}[{source}] ({len(data)} 字节)\n{body}\n"
+    def _store_msg(self, peer: str, direction: str, data: bytes):
+        msgs = self._convos.setdefault(peer, [])
+        msgs.append((direction, data, time.time()))
+        if len(msgs) > MAX_CONVO_MSGS:           # 每会话封顶，超出裁掉旧的一半
+            del msgs[:MAX_CONVO_MSGS // 2]
 
-    def _fmt_event(self, text: str):
-        return f"{self._ts()}* {text}\n"
+    def _fmt_ts(self, t: float) -> str:
+        if not self.rx_ts_var.get():
+            return ""
+        return time.strftime("[%H:%M:%S", time.localtime(t)) + \
+            f".{int(t * 1000) % 1000:03d}] "
+
+    def _fmt_body(self, data: bytes) -> str:
+        return format_hex(data) if self.rx_hex_var.get() \
+            else data.decode("utf-8", "replace")
+
+    def _insert_msg(self, direction: str, peer: str, data: bytes, t: float):
+        """插一条气泡：meta 行（时间+对端）+ 正文。正文换行不带 tag，
+        背景只包住文字，形成气泡效果。"""
+        w = self.rx_text
+        ts = self._fmt_ts(t)
+        if direction == "tx":
+            w.insert(tk.END, f"{ts}我 → {peer}\n", "tx_meta")
+            w.insert(tk.END, self._fmt_body(data), "tx")
+        else:
+            w.insert(tk.END, f"{ts}{peer}\n", "rx_meta")
+            w.insert(tk.END, self._fmt_body(data), "rx")
+        w.insert(tk.END, "\n\n")
+
+    def _append_msgs(self, items):
+        """items: ('msg', direction, peer, data, t) 或 ('sys', text)。"""
+        w = self.rx_text
+        w.config(state=tk.NORMAL)
+        for it in items:
+            if it[0] == "sys":
+                w.insert(tk.END, it[1] + "\n\n", "sys")
+            else:
+                self._insert_msg(it[1], it[2], it[3], it[4])
+        if int(w.index("end-1c").split(".")[0]) > MAX_RX_LINES:
+            w.delete("1.0", f"{MAX_RX_LINES // 2}.0")
+        w.see(tk.END)
+        w.config(state=tk.DISABLED)
+
+    def _render_chat(self, peer: str):
+        w = self.rx_text
+        w.config(state=tk.NORMAL)
+        w.delete("1.0", tk.END)
+        for direction, data, t in self._convos.get(peer, []):
+            self._insert_msg(direction, peer, data, t)
+        w.see(tk.END)
+        w.config(state=tk.DISABLED)
+
+    def _rerender(self):
+        if self.current_peer is not None:
+            self._render_chat(self.current_peer)
 
     def _log_event(self, text: str):
-        self._append_rx(self._fmt_event(text))
+        self._append_msgs([("sys", f"* {text}")])
         self.status_var.set(text)
 
-    def _append_rx(self, text: str):
-        t = self.rx_text
-        t.config(state=tk.NORMAL)
-        t.insert(tk.END, text)
-        if int(t.index("end-1c").split(".")[0]) > MAX_RX_LINES:
-            t.delete("1.0", f"{MAX_RX_LINES // 2}.0")
-        t.see(tk.END)
-        t.config(state=tk.DISABLED)
-
-    def _clear_rx(self):
+    def _clear_view(self):
         self.rx_text.config(state=tk.NORMAL)
         self.rx_text.delete("1.0", tk.END)
         self.rx_text.config(state=tk.DISABLED)
 
-    def _refresh_client_list(self, keys):
-        values = ["所有连接"] + keys
-        cur = self.client_var.get()
-        self.client_box.config(values=values)
-        if cur not in values:
-            self.client_var.set("所有连接")
+    def _clear_rx(self):
+        """清空按钮：清掉当前会话的聊天记录和视图。"""
+        if self.current_peer in self._convos:
+            self._convos[self.current_peer].clear()
+        self._clear_view()
 
     # ---------------- 发送 ----------------
 
@@ -895,21 +1033,51 @@ class NetTesterGUI:
             if not payload:
                 self.status_var.set("发送内容为空")
                 return False
+            n = 0
             if isinstance(self.worker, TCPServerWorker):
-                self.worker.send(payload, self.client_var.get())
-            else:
-                if isinstance(self.worker, UDPWorker):
-                    # 发送前同步目标地址（点选来源列表/手改后无需重开）
-                    self.worker.target = (self.remote_host.get().strip(),
-                                          int(self.remote_port.get()))
+                # 目标 = 当前会话的客户端；选中"（所有连接）"则群发
+                target = None if self.current_peer == self._special_peer() \
+                    else self.current_peer
+                n = self.worker.send(payload, target)
+                conv = self.current_peer or self._special_peer()
+            elif isinstance(self.worker, UDPWorker):
+                if self.current_peer == self._special_peer():
+                    # 群发：向每个已知来源各发一份
+                    if not self._peers:
+                        self.status_var.set("暂无已知来源，请先收到包或点选会话")
+                        return False
+                    for p in self._peers:
+                        h, pt = p.rsplit(":", 1)
+                        self.worker.target = (h, int(pt))
+                        self.worker.send(payload)
+                    n = len(self._peers)
+                    conv = self._special_peer()
+                else:
+                    # 单发：以目标地址栏为准（手改后自动切到对应会话）
+                    h = self.remote_host.get().strip()
+                    pt = int(self.remote_port.get())
+                    self.worker.target = (h, pt)
+                    self.worker.send(payload)
+                    n = 1
+                    conv = f"{h}:{pt}"
+            else:   # TCP Client：唯一对端是服务器
                 self.worker.send(payload)
+                n = 1
+                conv = self._server_peer
         except (ValueError, OSError) as e:
             self.status_var.set(f"发送失败: {e}")
             return False
-        self.tx_bytes += len(payload)
-        self.tx_pkts += 1
+        self.tx_bytes += len(payload) * n
+        self.tx_pkts += n
+        self._ensure_convo(conv)
+        self._store_msg(conv, "tx", payload)
+        if conv != self.current_peer:
+            self._select_convo(conv)
+        else:
+            self._append_msgs([("msg", "tx", conv, payload, time.time())])
         tag = "随机包" if random_pkt else "数据"
-        self.status_var.set(f"已发送{tag} {len(payload)} 字节")
+        self.status_var.set(f"已发送{tag} {len(payload)} 字节"
+                            + (f" × {n}" if n > 1 else ""))
         return True
 
     # ---------------- 定时发送 ----------------

@@ -44,14 +44,32 @@ def phase2():
           f"tx_bytes={gui.tx_bytes} rx_bytes={gui.rx_bytes}")
     assert gui.tx_pkts == 3, "应发送 3 包"
     assert gui.rx_pkts >= 3, f"应至少收到 3 包，实际 {gui.rx_pkts}"
-    # 来源列表应出现自己（自发自收），点选后填入目标地址栏
-    vals = str(gui.client_box.cget("values"))
-    assert "127.0.0.1:19099" in vals, f"来源列表未更新: {vals}"
-    gui.client_var.set("127.0.0.1:19099")
-    gui._on_client_pick()
+    # 会话列表应出现自己（自发自收），且已自动选中
+    peer = "127.0.0.1:19099"
+    assert peer in gui._convo_keys, f"联系人列表未更新: {gui._convo_keys}"
+    assert gui.current_peer == peer, f"首个会话应自动选中，实际 {gui.current_peer}"
+    # 点选联系人 -> 填入目标地址栏
+    idx = gui._convo_keys.index(peer)
+    gui.contact_list.selection_clear(0, tk.END)
+    gui.contact_list.selection_set(idx)
+    gui._on_contact_pick()
     assert gui.remote_host.get() == "127.0.0.1" and gui.remote_port.get() == "19099", \
-        "点选来源未填入目标地址"
+        "点选联系人未填入目标地址"
+    # 会话里应同时有 rx 和 tx 气泡记录
+    dirs = [m[0] for m in gui._convos[peer]]
+    assert dirs.count("rx") >= 3 and "tx" in dirs, f"会话消息记录不完整: {dirs}"
+    # 群发：选中"（所有已知来源）"发随机包 -> 向唯一已知来源（自己）发 1 份
+    gui._select_convo("（所有已知来源）")
+    assert gui.current_peer == "（所有已知来源）"
+    gui._reset_stats()
+    root.after(200, lambda: gui._send(random_pkt=True))
+    root.after(700, phase3)
+
+def phase3():
+    assert gui.tx_pkts == 1, f"群发应发 1 包，实际 {gui.tx_pkts}"
+    assert gui.rx_pkts == 1, f"群发给自己应收 1 包，实际 {gui.rx_pkts}"
     # 勾选"忽略本机来源"后，自发自收应被过滤掉
+    gui._select_convo("127.0.0.1:19099")
     gui.rx_ignore_local_var.set(True)
     gui._refresh_ignore_cache()
     assert "127.0.0.1" in gui._local_ips, "本机 IP 缓存未包含 127.0.0.1"
@@ -64,7 +82,7 @@ def finish():
     assert gui.rx_pkts == 0, f"勾选忽略本机来源后不应收到自己的包，实际 {gui.rx_pkts}"
     gui._close_worker()
     root.destroy()
-    print("GUI 冒烟测试通过（含来源列表联动、忽略本机来源过滤）")
+    print("GUI 冒烟测试通过（会话/群发/忽略本机来源）")
 
 root.after(1500, phase2)
 root.after(10000, lambda: (print("TIMEOUT"), os._exit(2)))
