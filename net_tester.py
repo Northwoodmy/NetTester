@@ -405,7 +405,7 @@ def apply_modern_theme(root):
                     foreground=color, font=(ui_font, 10, "bold"))
 
     s.configure("TButton", background=p["surface"], foreground=p["fg"],
-                borderwidth=0, padding=(12, 6), focusthickness=0)
+                borderwidth=0, padding=(16, 7), focusthickness=0)
     s.map("TButton",
           background=[("active", "#E8EAED"), ("pressed", p["select"]),
                       ("disabled", p["disabled_bg"])],
@@ -422,27 +422,48 @@ def apply_modern_theme(root):
           background=[("active", p["green_hi"]), ("pressed", p["green_press"]),
                       ("disabled", p["disabled_bg"])],
           foreground=[("disabled", p["disabled_fg"])])
+    # 输入框：Material 文本框 —— 白底灰描边，聚焦描边变蓝
     s.configure("TEntry", fieldbackground=p["field"], foreground=p["fg"],
-                insertcolor=p["fg"], bordercolor=p["border"], padding=4)
-    s.map("TEntry", fieldbackground=[("disabled", p["disabled_bg"])],
-          foreground=[("disabled", p["disabled_fg"])])
+                insertcolor=p["fg"], bordercolor=p["border"],
+                lightcolor=p["field"], darkcolor=p["field"], padding=6)
+    s.map("TEntry",
+          fieldbackground=[("disabled", p["disabled_bg"])],
+          foreground=[("disabled", p["disabled_fg"])],
+          bordercolor=[("focus", p["accent"]), ("active", p["subtle"])])
+    # 下拉框：白底 + 箭头悬停加深，文字与箭头间留白
     s.configure("TCombobox", fieldbackground=p["field"], foreground=p["fg"],
-                background=p["surface"], arrowcolor=p["subtle"],
-                bordercolor=p["border"], padding=4)
+                background=p["field"], arrowcolor=p["subtle"], arrowsize=13,
+                bordercolor=p["border"], lightcolor=p["field"],
+                darkcolor=p["field"], padding=(6, 6, 20, 6))
     s.map("TCombobox",
           fieldbackground=[("readonly", p["field"]), ("disabled", p["disabled_bg"])],
           foreground=[("readonly", p["fg"]), ("disabled", p["disabled_fg"])],
-          arrowcolor=[("disabled", p["disabled_fg"])])
+          bordercolor=[("focus", p["accent"]), ("active", p["subtle"])],
+          arrowcolor=[("active", p["fg"]), ("disabled", p["disabled_fg"])])
+    # 下拉弹层：扁平无描边，选中项浅蓝底深蓝字，无虚线框
     root.option_add("*TCombobox*Listbox.background", p["field"])
     root.option_add("*TCombobox*Listbox.foreground", p["fg"])
-    root.option_add("*TCombobox*Listbox.selectBackground", p["accent"])
-    root.option_add("*TCombobox*Listbox.selectForeground", "#FFFFFF")
-    s.configure("TCheckbutton", background=p["bg"], foreground=p["fg"])
-    s.map("TCheckbutton", background=[("active", p["bg"])],
-          indicatorcolor=[("selected", p["accent"]), ("!selected", "#FFFFFF")])
+    root.option_add("*TCombobox*Listbox.selectBackground", p["select"])
+    root.option_add("*TCombobox*Listbox.selectForeground", p["accent_press"])
+    root.option_add("*TCombobox*Listbox.borderWidth", 0)
+    root.option_add("*TCombobox*Listbox.highlightThickness", 0)
+    root.option_add("*TCombobox*Listbox.relief", "flat")
+    root.option_add("*TCombobox*Listbox.activeStyle", "none")
+    # 复选框：Material 蓝底白勾，未选中为灰描边白底，悬停描边加深
+    s.configure("TCheckbutton", background=p["bg"], foreground=p["fg"],
+                bordercolor=p["border"], indicatorcolor="#FFFFFF",
+                indicatorforeground="#FFFFFF", indicatormargin=(0, 6, 0, 0))
+    s.map("TCheckbutton",
+          background=[("active", p["bg"])],
+          bordercolor=[("active", p["subtle"]), ("selected", p["accent"])],
+          indicatorcolor=[("!selected", "#FFFFFF"),
+                          ("selected", p["accent"]),
+                          ("pressed", p["accent_press"])])
     s.configure("TSeparator", background=p["border"])
     s.configure("Vertical.TScrollbar", background=p["border"], troughcolor=p["bg"],
-                bordercolor=p["bg"], arrowcolor=p["subtle"])
+                bordercolor=p["bg"], arrowcolor=p["subtle"], arrowsize=12)
+    s.map("Vertical.TScrollbar",
+          background=[("active", "#BDC1C6"), ("pressed", p["disabled_fg"])])
     s.configure("Status.TLabel", background=p["surface"], foreground=p["subtle"])
 
     # Windows 毛玻璃；Linux/X11 半透明（浅色主题默认关闭）
