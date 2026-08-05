@@ -404,20 +404,23 @@ def apply_modern_theme(root):
         s.configure(f"{name}.TLabelframe.Label", background=p["bg"],
                     foreground=color, font=(ui_font, 10, "bold"))
 
-    s.configure("TButton", background=p["surface"], foreground=p["fg"],
-                borderwidth=0, padding=(16, 7), focusthickness=0)
+    # 普通按钮：Material 描边按钮 —— 白底灰框蓝字，与背景区分开
+    s.configure("TButton", background="#FFFFFF", foreground=p["accent"],
+                bordercolor=p["border"], borderwidth=1,
+                padding=(16, 7), focusthickness=0)
     s.map("TButton",
-          background=[("active", "#E8EAED"), ("pressed", p["select"]),
+          background=[("active", "#F1F3F4"), ("pressed", p["select"]),
                       ("disabled", p["disabled_bg"])],
-          foreground=[("disabled", p["disabled_fg"])])
+          foreground=[("disabled", p["disabled_fg"])],
+          bordercolor=[("active", p["subtle"]), ("disabled", p["border"])])
     s.configure("Accent.TButton", background=p["accent"], foreground="#FFFFFF",
-                font=(ui_font, 10, "bold"))
+                borderwidth=0, font=(ui_font, 10, "bold"))
     s.map("Accent.TButton",
           background=[("active", p["accent_hi"]), ("pressed", p["accent_press"]),
                       ("disabled", p["disabled_bg"])],
           foreground=[("disabled", p["disabled_fg"])])
     s.configure("Green.TButton", background=p["green"], foreground="#FFFFFF",
-                font=(ui_font, 10, "bold"))
+                borderwidth=0, font=(ui_font, 10, "bold"))
     s.map("Green.TButton",
           background=[("active", p["green_hi"]), ("pressed", p["green_press"]),
                       ("disabled", p["disabled_bg"])],
@@ -452,6 +455,7 @@ def apply_modern_theme(root):
     # 复选框：Material 蓝底白勾（Tk 8.6 clam 只认 indicatorbackground /
     # indicatorforeground / upper/lowerbordercolor，不认 indicatorcolor）
     s.configure("TCheckbutton", background=p["bg"], foreground=p["fg"],
+                indicatorsize=16,
                 indicatorbackground="#FFFFFF", indicatorforeground="#FFFFFF",
                 upperbordercolor=p["border"], lowerbordercolor=p["border"],
                 indicatormargin=(0, 6, 0, 0))
