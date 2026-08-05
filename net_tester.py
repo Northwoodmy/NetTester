@@ -605,23 +605,35 @@ class NetTesterGUI:
         self.local_port.grid(row=3, column=1, sticky=tk.W, padx=(4, 0))
 
         self.open_btn = ttk.Button(left, text="打开", style="Accent.TButton",
-                                   command=self._toggle_open)
+                                   command=self._open_from_panel)
         self.open_btn.grid(row=4, column=0, columnspan=2, sticky=tk.EW, pady=(8, 2))
 
-        ttk.Separator(left).grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=8)
+        # 已开通道列表：选中哪个关哪个（打开只负责开，关闭在这里）
+        chan_row = ttk.Frame(left)
+        chan_row.grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=2)
+        ttk.Label(chan_row, text="通道").pack(side=tk.LEFT)
+        self.chan_var = tk.StringVar()
+        self.chan_box = ttk.Combobox(chan_row, textvariable=self.chan_var,
+                                     state="readonly", width=13)
+        self.chan_box.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        ttk.Button(chan_row, text="关闭", width=4,
+                   command=self._close_selected_channel).pack(side=tk.RIGHT)
+        self._chan_ids = []
+
+        ttk.Separator(left).grid(row=6, column=0, columnspan=2, sticky=tk.EW, pady=8)
 
         self.stats_tx_lbl = tk.Label(left, text="发送: 0 B / 0 包",
                                      fg=PALETTE["accent"], bg=PALETTE["bg"],
                                      anchor=tk.W, justify=tk.LEFT)
-        self.stats_tx_lbl.grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=2)
+        self.stats_tx_lbl.grid(row=7, column=0, columnspan=2, sticky=tk.W, pady=2)
         self.stats_rx_lbl = tk.Label(left, text="接收: 0 B / 0 包",
                                      fg=PALETTE["green"], bg=PALETTE["bg"],
                                      anchor=tk.W, justify=tk.LEFT)
-        self.stats_rx_lbl.grid(row=7, column=0, columnspan=2, sticky=tk.W, pady=2)
+        self.stats_rx_lbl.grid(row=8, column=0, columnspan=2, sticky=tk.W, pady=2)
         self.rate_lbl = ttk.Label(left, text="速率 ↑ 0 B/s  ↓ 0 B/s")
-        self.rate_lbl.grid(row=8, column=0, columnspan=2, sticky=tk.W, pady=2)
+        self.rate_lbl.grid(row=9, column=0, columnspan=2, sticky=tk.W, pady=2)
         ttk.Button(left, text="统计清零", command=self._reset_stats).grid(
-            row=9, column=0, columnspan=2, sticky=tk.EW, pady=(4, 0))
+            row=10, column=0, columnspan=2, sticky=tk.EW, pady=(4, 0))
 
         left.columnconfigure(0, weight=1)
 
@@ -758,13 +770,14 @@ class NetTesterGUI:
         # 本地地址仅 TCP Client 用不到（对端由会话连接决定）
         for w in (self.local_host, self.local_port):
             w.config(state=tk.DISABLED if is_client else tk.NORMAL)
+        self.open_btn.config(text={"TCP Server": "开始监听", "TCP Client": "打开",
+                                   "UDP": "打开"}[mode])
         # 「发起新会话」：UDP=添加目标，TCP Client=连接新服务器；Server 的对端
         # 由客户端连入决定，不能主动添加。切换模式不再清空会话/通道。
         if mode == "TCP Server":
             self.add_row.pack_forget()
         else:
             self.add_row.pack(fill=tk.X, pady=(4, 0))
-        self._sync_open_btn()
 
     # ---------------- 通道管理（多通道并存：协议 + 本地端口） ----------------
 
@@ -776,6 +789,14 @@ class NetTesterGUI:
     def _cid_tag(cid: str) -> str:
         proto, _h, p = cid.split(":", 2)
         return {"udp": f"UDP·{p}", "tcps": f"TCP·{p}", "tcpc": "TCP"}[proto]
+
+    @staticmethod
+    def _chan_disp(cid: str) -> str:
+        """通道列表里的显示名。"""
+        proto, h, p = cid.split(":", 2)
+        if proto == "tcpc":
+            return f"TCP→{h}:{p}"
+        return f"{'UDP' if proto == 'udp' else 'TCP'}·{p}"
 
     @staticmethod
     def _peer_of(ckey: str) -> str:
@@ -793,21 +814,20 @@ class NetTesterGUI:
             tag += "·已关闭"
         return f"（群发）[{tag}]" if peer == "*" else f"{peer} [{tag}]"
 
-    def _sync_open_btn(self):
-        """打开按钮跟随当前配置：对应通道已存在则显示「关闭」。"""
-        mode = self.mode_var.get()
-        if mode == "TCP Client":
-            self.open_btn.config(text="打开")
-            return
-        proto = "udp" if mode == "UDP" else "tcps"
-        cid = self._cid(proto, self.local_host.get().strip(),
-                        self.local_port.get().strip())
-        if cid in self.channels:
-            self.open_btn.config(text="关闭")
+    def _refresh_chan_box(self):
+        """刷新左侧通道下拉框（打开只负责开，关闭在这里选）。"""
+        self._chan_ids = list(self.channels)
+        self.chan_box.config(
+            values=[self._chan_disp(c) for c in self._chan_ids])
+        if self._chan_ids:
+            cur = self.chan_box.current()
+            self.chan_box.current(
+                0 if cur < 0 else min(cur, len(self._chan_ids) - 1))
         else:
-            self.open_btn.config(text={"UDP": "打开", "TCP Server": "开始监听"}[mode])
+            self.chan_var.set("")
 
-    def _toggle_open(self):
+    def _open_from_panel(self):
+        """「打开」按钮：按当前配置开通道（已存在则提示，不做开关切换）。"""
         mode = self.mode_var.get()
         if mode == "TCP Client":
             self.status_var.set("TCP Client 请在下方「发起新会话」输入服务器地址连接")
@@ -816,10 +836,18 @@ class NetTesterGUI:
         cid = self._cid(proto, self.local_host.get().strip(),
                         self.local_port.get().strip())
         if cid in self.channels:
-            self._close_channel(cid)
-        else:
-            self._open_channel(proto, self.local_host.get().strip(),
-                               self.local_port.get().strip())
+            self.status_var.set(f"通道已存在 [{self._cid_tag(cid)}]，"
+                                f"要关闭请在下方通道列表选择")
+            return
+        self._open_channel(proto, self.local_host.get().strip(),
+                           self.local_port.get().strip())
+
+    def _close_selected_channel(self):
+        idx = self.chan_box.current()
+        if idx < 0 or idx >= len(self._chan_ids):
+            self.status_var.set("请先在下拉框选择要关闭的通道")
+            return
+        self._close_channel(self._chan_ids[idx])
 
     def _cli_open(self):
         """CLI --open：按当前模式建通道；--remote-* 目标建成会话/发起连接。"""
@@ -863,7 +891,7 @@ class NetTesterGUI:
         self.channels[cid] = w
         self._ensure_convo(f"{cid}|*")          # 该通道的群发会话
         self._refresh_contacts()
-        self._sync_open_btn()
+        self._refresh_chan_box()
         self._refresh_ignore_cache()
         self.status_var.set(
             f"通道已打开 [{self._cid_tag(cid)}]，共 {len(self.channels)} 个")
@@ -876,7 +904,7 @@ class NetTesterGUI:
         w.stop()
         # 会话与聊天记录保留（类微信），群发项随通道消失、重开时恢复
         self._refresh_contacts()
-        self._sync_open_btn()
+        self._refresh_chan_box()
         self._log_event(f"--- 通道已关闭 [{self._cid_tag(cid)}] ---")
         if not self.channels:
             self.status_var.set("全部通道已关闭")
@@ -894,6 +922,7 @@ class NetTesterGUI:
                                 lambda t, c=cid: self._q_event(c, t))
             w.start()
             self.channels[cid] = w
+            self._refresh_chan_box()
             self.status_var.set(f"通道已打开 [TCP]，共 {len(self.channels)} 个")
         try:
             w.connect(host, port)
@@ -902,6 +931,7 @@ class NetTesterGUI:
             if not w.conn_keys():               # 空通道不留
                 self.channels.pop(cid, None)
                 w.stop()
+                self._refresh_chan_box()
             return None
         ckey = f"{cid}|{host}:{port}"
         self._ensure_convo(ckey)

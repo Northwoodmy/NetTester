@@ -58,7 +58,7 @@ for entry, val in ((gui.local_host, "127.0.0.1"), (gui.local_port, "19099")):
     entry.delete(0, tk.END)
     entry.insert(0, val)
 
-gui._toggle_open()                      # 打开 UDP 通道
+gui._open_from_panel()                 # 打开 UDP 通道
 assert CID in gui.channels, "UDP 通道未打开"
 gui.new_peer.insert(0, "127.0.0.1:19099")
 gui._add_target()
@@ -130,7 +130,7 @@ def phase4():
     # 第二个 UDP 通道（不同端口），与第一个并存
     gui.local_port.delete(0, tk.END)
     gui.local_port.insert(0, "19096")
-    gui._toggle_open()
+    gui._open_from_panel()
     assert "udp:127.0.0.1:19096" in gui.channels and CID in gui.channels, \
         f"两个 UDP 通道应并存: {list(gui.channels)}"
     # 切 TCP Client 加会话（切换模式不应清空已有会话/通道）
@@ -172,7 +172,7 @@ def phase6():
     # 重开第一个通道：群发项恢复，历史会话还能继续用
     gui.local_port.delete(0, tk.END)
     gui.local_port.insert(0, "19099")
-    gui._toggle_open()
+    gui._open_from_panel()
     assert CID in gui.channels, "重新打开通道失败"
     assert GROUP in gui._convo_keys, "重开后群发项应恢复"
     assert "已关闭" not in gui._display(PEER), "重开后不应再标注已关闭"

@@ -67,28 +67,28 @@ def step(fn):
 
 
 def step_open():
-    gui._toggle_open()
+    gui._open_from_panel()
     assert CID in gui.channels, "打开失败"
-    assert gui.open_btn.cget("text") == "关闭", f"按钮文本: {gui.open_btn.cget('text')}"
+    assert gui._chan_ids == [CID], f"通道列表应显示新通道: {gui._chan_ids}"
     assert port_is_busy(PORT), "打开后端口应处于绑定状态"
-    print("PASS 打开后按钮变为'关闭'，端口已绑定")
+    print("PASS 通道打开，通道列表可见，端口已绑定")
     root.after(50, lambda: step(step_close))
 
 
 def step_close():
-    gui._toggle_open()
+    gui._close_selected_channel()       # 从通道列表关闭
     assert CID not in gui.channels, "关闭后通道应移除"
-    assert gui.open_btn.cget("text") == "打开", f"按钮文本: {gui.open_btn.cget('text')}"
+    assert gui._chan_ids == [], "关闭后通道列表应为空"
     assert not port_is_busy(PORT), "关闭后端口应立即释放"   # 竞态回归项
     print("PASS 关闭后按钮恢复'打开'，端口立即释放")
     root.after(50, lambda: step(step_reopen))
 
 
 def step_reopen():
-    gui._toggle_open()                    # 关闭后立刻重开（旧 bug 在此报 EADDRINUSE）
+    gui._open_from_panel()              # 关闭后立刻重开（旧 bug 在此报 EADDRINUSE）
     assert CID in gui.channels, f"重开失败: {FakeMessageBox.errors}"
     assert port_is_busy(PORT)
-    gui._toggle_open()
+    gui._close_selected_channel()
     assert CID not in gui.channels
     print("PASS 关闭后可立刻重新打开")
     root.destroy()
