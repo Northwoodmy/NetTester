@@ -545,7 +545,7 @@ class NetTesterGUI:
         self._convo_keys = []            # 联系人列表行对应的 ckey
         self._unread = {}                # ckey -> 未读条数
         self.current_peer = None         # 当前选中的会话 ckey
-        self._pending_target = None      # CLI --remote-* 指定的、待建成会话的目标
+        self._cli_cfg = {}               # CLI 参数（--open 建会话 & 对话框预填）
         self._last_visible = None        # 联系人列表变化检测缓存
 
         # 统计
@@ -572,86 +572,33 @@ class NetTesterGUI:
     # ---------------- UI 搭建 ----------------
 
     def _build_ui(self):
-        # 状态栏先按底部占位（pack 顺序决定空间分配优先级）
+        self._ui_font = "Segoe UI" if IS_WIN else "Noto Sans CJK SC"
+
+        # 底部状态栏：左=状态文字，右=统计+清零（先 pack，窗口变矮时优先保住）
+        status = ttk.Frame(self.root, padding=(8, 3))
+        status.pack(fill=tk.X, side=tk.BOTTOM)
         self.status_var = tk.StringVar(value="就绪")
-        ttk.Label(self.root, textvariable=self.status_var, style="Status.TLabel",
-                  anchor=tk.W, padding=(8, 3)).pack(fill=tk.X, side=tk.BOTTOM)
+        ttk.Label(status, textvariable=self.status_var, style="Status.TLabel",
+                  anchor=tk.W).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(status, text="清零", width=4,
+                   command=self._reset_stats).pack(side=tk.RIGHT)
+        self.rate_lbl = ttk.Label(status, text="↑ 0 B/s ↓ 0 B/s")
+        self.rate_lbl.pack(side=tk.RIGHT, padx=(10, 6))
+        self.stats_rx_lbl = tk.Label(status, text="↓ 0 B / 0 包",
+                                     fg=PALETTE["green"], bg=PALETTE["bg"])
+        self.stats_rx_lbl.pack(side=tk.RIGHT, padx=6)
+        self.stats_tx_lbl = tk.Label(status, text="↑ 0 B / 0 包",
+                                     fg=PALETTE["accent"], bg=PALETTE["bg"])
+        self.stats_tx_lbl.pack(side=tk.RIGHT, padx=6)
 
         main = ttk.Frame(self.root, padding=6)
         main.pack(fill=tk.BOTH, expand=True)
 
-        # 左侧设置面板
-        left = ttk.LabelFrame(main, text=" 设置 ", padding=8, style="Blue.TLabelframe")
-        left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 6))
-
-        ttk.Label(left, text="工作模式").grid(row=0, column=0, sticky=tk.W, pady=2)
-        self.mode_var = tk.StringVar(value="TCP Server")
-        self.mode_box = ttk.Combobox(left, textvariable=self.mode_var, state="readonly",
-                                     values=["TCP Server", "TCP Client", "UDP"], width=14)
-        self.mode_box.grid(row=1, column=0, columnspan=2, sticky=tk.EW, pady=2)
-        self.mode_box.bind("<<ComboboxSelected>>", lambda _e: self._on_mode_change())
-
-        ttk.Label(left, text="本地地址").grid(row=2, column=0, sticky=tk.W, pady=2)
-        ips = detect_local_ips()
-        self.local_host = ttk.Combobox(left, width=12, values=ips)
-        self.local_host.set(ips[0])
-        self.local_host.grid(row=3, column=0, sticky=tk.EW, pady=2)
-        try:    # 下拉时刷新网卡地址（WiFi 切换等场景）
-            self.local_host.config(postcommand=self._refresh_local_ips)
-        except tk.TclError:
-            pass
-        self.local_port = ttk.Entry(left, width=7)
-        self.local_port.insert(0, "9000")
-        self.local_port.grid(row=3, column=1, sticky=tk.W, padx=(4, 0))
-
-        self.open_btn = ttk.Button(left, text="打开", style="Accent.TButton",
-                                   command=self._open_from_panel)
-        self.open_btn.grid(row=4, column=0, columnspan=2, sticky=tk.EW, pady=(8, 2))
-
-        # 已开通道列表：选中哪个关哪个（打开只负责开，关闭在这里）
-        chan_row = ttk.Frame(left)
-        chan_row.grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=2)
-        ttk.Label(chan_row, text="通道").pack(side=tk.LEFT)
-        self.chan_var = tk.StringVar()
-        self.chan_box = ttk.Combobox(chan_row, textvariable=self.chan_var,
-                                     state="readonly", width=13)
-        self.chan_box.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
-        ttk.Button(chan_row, text="关闭", width=4,
-                   command=self._close_selected_channel).pack(side=tk.RIGHT)
-        self._chan_ids = []
-
-        ttk.Separator(left).grid(row=6, column=0, columnspan=2, sticky=tk.EW, pady=8)
-
-        self.stats_tx_lbl = tk.Label(left, text="发送: 0 B / 0 包",
-                                     fg=PALETTE["accent"], bg=PALETTE["bg"],
-                                     anchor=tk.W, justify=tk.LEFT)
-        self.stats_tx_lbl.grid(row=7, column=0, columnspan=2, sticky=tk.W, pady=2)
-        self.stats_rx_lbl = tk.Label(left, text="接收: 0 B / 0 包",
-                                     fg=PALETTE["green"], bg=PALETTE["bg"],
-                                     anchor=tk.W, justify=tk.LEFT)
-        self.stats_rx_lbl.grid(row=8, column=0, columnspan=2, sticky=tk.W, pady=2)
-        self.rate_lbl = ttk.Label(left, text="速率 ↑ 0 B/s  ↓ 0 B/s")
-        self.rate_lbl.grid(row=9, column=0, columnspan=2, sticky=tk.W, pady=2)
-        ttk.Button(left, text="统计清零", command=self._reset_stats).grid(
-            row=10, column=0, columnspan=2, sticky=tk.EW, pady=(4, 0))
-
-        left.columnconfigure(0, weight=1)
-
-        # 右侧数据面板
-        right = ttk.Frame(main)
-        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        # 会话区（类微信：左联系人列表，右对话面板 = 气泡 + 输入合并）
-        rx_frame = ttk.LabelFrame(right, text=" 会话 ", padding=4,
-                                  style="Green.TLabelframe")
-        rx_frame.pack(fill=tk.BOTH, expand=True)
-
-        chat_box = ttk.Frame(rx_frame)
-        chat_box.pack(fill=tk.BOTH, expand=True)
-        left_col = ttk.Frame(chat_box)
-        left_col.pack(side=tk.LEFT, fill=tk.Y)
+        # 左栏：会话联系人列表 + 发起新会话按钮（类微信）
+        contact_col = ttk.Frame(main)
+        contact_col.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 6))
         self.contact_list = tk.Listbox(
-            left_col, width=26, bg="#FFFFFF", fg=PALETTE["fg"],
+            contact_col, width=24, bg="#FFFFFF", fg=PALETTE["fg"],
             selectbackground=PALETTE["select"],
             selectforeground=PALETTE["accent_press"],
             relief="flat", highlightthickness=1,
@@ -660,10 +607,15 @@ class NetTesterGUI:
             activestyle="none", exportselection=False)
         self.contact_list.pack(fill=tk.BOTH, expand=True)
         self.contact_list.bind("<<ListboxSelect>>", self._on_contact_pick)
-        ttk.Separator(chat_box, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y)
+        self.contact_list.bind("<Button-3>", self._on_contact_menu)
+        ttk.Button(contact_col, text="＋ 发起新会话", style="Accent.TButton",
+                   command=self._show_new_session_dialog).pack(fill=tk.X,
+                                                               pady=(4, 0))
+        ttk.Separator(main, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y,
+                                                     padx=(0, 6))
 
-        # 右侧对话面板：顶部显示选项，中间气泡，底部输入区
-        conv_col = ttk.Frame(chat_box)
+        # 右栏对话面板：顶部标题+显示选项，中间气泡，底部输入区
+        conv_col = ttk.Frame(main)
         conv_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # —— 底部输入区先按底打包（窗口变矮时优先保住，不被气泡区挤掉）——
@@ -706,7 +658,11 @@ class NetTesterGUI:
                                    command=lambda: self._send(random_pkt=True))
         self.rand_btn.pack(side=tk.LEFT, padx=10)
 
-        # —— 顶部显示选项工具条 ——
+        # —— 顶部：当前会话标题 + 显示选项工具条 ——
+        self.convo_title = ttk.Label(conv_col, text="未选择会话",
+                                     font=(self._ui_font, 11, "bold"))
+        self.convo_title.pack(fill=tk.X, pady=(0, 2))
+
         rx_opt = ttk.Frame(conv_col)
         rx_opt.pack(fill=tk.X, pady=(0, 2))
         self.rx_hex_var = tk.BooleanVar(value=False)
@@ -741,43 +697,7 @@ class NetTesterGUI:
         t.tag_configure("sys", foreground="#9AA0A6", font=(ui_font, 8),
                         justify=tk.CENTER, spacing1=6)
 
-        # 发起新会话行（仅 UDP 模式显示，主动添加目标，可逗号分隔多个）
-        self.add_row = ttk.Frame(left_col)
-        ttk.Label(self.add_row, text="发起新会话 IP:端口（逗号可分隔多个）",
-                  font=(ui_font, 8), foreground=PALETTE["subtle"]).pack(anchor=tk.W)
-        add_line = ttk.Frame(self.add_row)
-        add_line.pack(fill=tk.X, pady=(2, 0))
-        self.new_peer = ttk.Entry(add_line)
-        self.new_peer.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
-        self.new_peer.bind("<Return>", lambda _e: self._add_target())
-        ttk.Button(add_line, text="添加", width=4,
-                   command=self._add_target).pack(side=tk.RIGHT)
-
-        self._on_mode_change()
-
-    # ---------------- 模式与连接管理 ----------------
-
-    def _refresh_local_ips(self):
-        cur = self.local_host.get()
-        ips = detect_local_ips()
-        self.local_host.config(values=ips)
-        if cur and cur not in ips:         # 保留手动输入的地址
-            self.local_host.config(values=ips + [cur])
-
-    def _on_mode_change(self):
-        mode = self.mode_var.get()
-        is_client = mode == "TCP Client"
-        # 本地地址仅 TCP Client 用不到（对端由会话连接决定）
-        for w in (self.local_host, self.local_port):
-            w.config(state=tk.DISABLED if is_client else tk.NORMAL)
-        self.open_btn.config(text={"TCP Server": "开始监听", "TCP Client": "打开",
-                                   "UDP": "打开"}[mode])
-        # 「发起新会话」：UDP=添加目标，TCP Client=连接新服务器；Server 的对端
-        # 由客户端连入决定，不能主动添加。切换模式不再清空会话/通道。
-        if mode == "TCP Server":
-            self.add_row.pack_forget()
-        else:
-            self.add_row.pack(fill=tk.X, pady=(4, 0))
+        self._refresh_contacts()
 
     # ---------------- 通道管理（多通道并存：协议 + 本地端口） ----------------
 
@@ -789,14 +709,6 @@ class NetTesterGUI:
     def _cid_tag(cid: str) -> str:
         proto, _h, p = cid.split(":", 2)
         return {"udp": f"UDP·{p}", "tcps": f"TCP·{p}", "tcpc": "TCP"}[proto]
-
-    @staticmethod
-    def _chan_disp(cid: str) -> str:
-        """通道列表里的显示名。"""
-        proto, h, p = cid.split(":", 2)
-        if proto == "tcpc":
-            return f"TCP→{h}:{p}"
-        return f"{'UDP' if proto == 'udp' else 'TCP'}·{p}"
 
     @staticmethod
     def _peer_of(ckey: str) -> str:
@@ -814,59 +726,203 @@ class NetTesterGUI:
             tag += "·已关闭"
         return f"（群发）[{tag}]" if peer == "*" else f"{peer} [{tag}]"
 
-    def _refresh_chan_box(self):
-        """刷新左侧通道下拉框（打开只负责开，关闭在这里选）。"""
-        self._chan_ids = list(self.channels)
-        self.chan_box.config(
-            values=[self._chan_disp(c) for c in self._chan_ids])
-        if self._chan_ids:
-            cur = self.chan_box.current()
-            self.chan_box.current(
-                0 if cur < 0 else min(cur, len(self._chan_ids) - 1))
+    # ---------------- 发起新会话（对话框：协议 + 地址 + 端口） ----------------
+
+    def _create_session(self, proto: str, lhost: str = "", lport: str = "",
+                        thost: str = "", tport: str = "") -> bool:
+        """统一建会话入口（对话框 / CLI / 测试共用）。
+
+        proto: udp=绑定本地端口收发（thost 可留空仅监听，也可逗号分隔多个
+        目标、共用 tport）；tcps=本地监听；tcpc=连接目标服务器。"""
+        try:
+            if proto == "tcpc":
+                ckey = self._connect_tcp_client(thost, int(tport))
+                if not ckey:
+                    return False                # 连接失败，状态栏已提示
+                self._select_convo(ckey)
+                return True
+            cid = self._open_channel(proto, lhost, str(int(lport)))
+            if not cid:
+                return False                    # 打开失败，错误已弹窗
+            if proto == "udp" and thost:
+                last = None
+                for h in re.split(r"[,，;；\s]+", thost):
+                    if h:
+                        last = f"{cid}|{h}:{int(tport)}"
+                        self._ensure_convo(last)
+                if last:
+                    self._select_convo(last)
+                    return True
+            self._select_convo(f"{cid}|*")      # 无目标：选中该通道群发项
+            return True
+        except (ValueError, OSError) as e:
+            self.status_var.set(f"发起会话失败: {e}")
+            return False
+
+    def _show_new_session_dialog(self):
+        """发起新会话对话框：协议 + 本地/目标地址端口，按协议启用对应字段。"""
+        if getattr(self, "_dlg", None) is not None:
+            try:
+                if self._dlg.winfo_exists():
+                    self._dlg.lift()            # 已打开则提到前面
+                    return
+            except tk.TclError:
+                pass
+        cfg = self._cli_cfg                     # CLI 参数作为默认值预填
+        dlg = tk.Toplevel(self.root)
+        self._dlg = dlg
+        dlg.title("发起新会话")
+        dlg.transient(self.root)
+        dlg.resizable(False, False)
+        body = ttk.Frame(dlg, padding=14)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        ips = detect_local_ips()
+        th_def, _, tp_def = (cfg.get("target") or "").rpartition(":")
+        pvar = tk.StringVar(value=cfg.get("mode") or "UDP")
+
+        ttk.Label(body, text="协议").grid(row=0, column=0, sticky=tk.W, pady=3)
+        pbox = ttk.Combobox(body, textvariable=pvar, state="readonly",
+                            values=["UDP", "TCP Server", "TCP Client"], width=12)
+        pbox.grid(row=0, column=1, sticky=tk.W, pady=3)
+
+        ttk.Label(body, text="本地地址").grid(row=1, column=0, sticky=tk.W, pady=3)
+        lh = ttk.Combobox(body, values=ips, width=16)
+        lh.set(cfg.get("lhost") or ips[0])
+        lh.grid(row=1, column=1, sticky=tk.EW, pady=3)
+        ttk.Label(body, text="本地端口").grid(row=2, column=0, sticky=tk.W, pady=3)
+        lp = ttk.Entry(body, width=8)
+        lp.insert(0, str(cfg.get("lport") or "9000"))
+        lp.grid(row=2, column=1, sticky=tk.W, pady=3)
+
+        ttk.Label(body, text="目标地址").grid(row=3, column=0, sticky=tk.W, pady=3)
+        th = ttk.Entry(body, width=18)
+        th.insert(0, th_def)
+        th.grid(row=3, column=1, sticky=tk.EW, pady=3)
+        ttk.Label(body, text="目标端口").grid(row=4, column=0, sticky=tk.W, pady=3)
+        tp = ttk.Entry(body, width=8)
+        if tp_def:
+            tp.insert(0, tp_def)
+        tp.grid(row=4, column=1, sticky=tk.W, pady=3)
+
+        hint = ttk.Label(body, font=(self._ui_font, 8),
+                         foreground=PALETTE["subtle"], justify=tk.LEFT)
+        hint.grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=(2, 0))
+        err = tk.StringVar()
+        tk.Label(body, textvariable=err, fg="#D93025", bg=PALETTE["bg"],
+                 anchor=tk.W, justify=tk.LEFT, wraplength=260).grid(
+            row=6, column=0, columnspan=2, sticky=tk.EW)
+
+        btns = ttk.Frame(body)
+        btns.grid(row=7, column=0, columnspan=2, sticky=tk.E, pady=(10, 0))
+        ttk.Button(btns, text="取消",
+                   command=dlg.destroy).pack(side=tk.RIGHT, padx=(6, 0))
+        ttk.Button(btns, text="确定", style="Accent.TButton",
+                   command=lambda: self._dlg_confirm(
+                       dlg, pvar, lh, lp, th, tp, err)).pack(side=tk.RIGHT)
+
+        def sync_fields(*_):
+            """按协议启用/禁用本地与目标字段，并更新提示。"""
+            mode = pvar.get()
+            st_local = tk.DISABLED if mode == "TCP Client" else tk.NORMAL
+            lh.config(state=st_local)
+            lp.config(state=st_local)
+            st_tgt = tk.DISABLED if mode == "TCP Server" else tk.NORMAL
+            th.config(state=st_tgt)
+            tp.config(state=st_tgt)
+            hint.config(text={
+                "UDP": "绑定本地地址收发 UDP；目标可留空（仅监听），\n"
+                       "多个目标用逗号分隔，共用同一目标端口",
+                "TCP Server": "在本地地址监听，等待客户端连入",
+                "TCP Client": "主动连接目标服务器（目标必填）"}[mode])
+        pbox.bind("<<ComboboxSelected>>", sync_fields)
+        sync_fields()
+
+        dlg.bind("<Return>", lambda _e: self._dlg_confirm(
+            dlg, pvar, lh, lp, th, tp, err))
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        dlg.update_idletasks()
+        rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
+        dlg.geometry(f"+{rx + (self.root.winfo_width() - dlg.winfo_reqwidth()) // 2}"
+                     f"+{ry + (self.root.winfo_height() - dlg.winfo_reqheight()) // 2}")
+        dlg.grab_set()                          # 模态
+        pbox.focus_set()
+
+    def _dlg_confirm(self, dlg, pvar, lh, lp, th, tp, err):
+        """对话框确定：校验通过后调 _create_session，失败红字提示不关闭。"""
+        proto = {"UDP": "udp", "TCP Server": "tcps",
+                 "TCP Client": "tcpc"}[pvar.get()]
+        lhost, lport = lh.get().strip(), lp.get().strip()
+        thost, tport = th.get().strip(), tp.get().strip()
+
+        def bad(msg):
+            err.set(msg)
+        if proto != "tcpc":
+            if not lhost:
+                return bad("请填写本地地址")
+            if not lport.isdigit() or not 0 < int(lport) < 65536:
+                return bad("本地端口应为 1-65535 的数字")
+        if proto == "tcpc" and (not thost or not tport):
+            return bad("TCP Client 需要填写目标地址和端口")
+        if proto == "udp" and thost and not tport:
+            return bad("填写了目标地址，请同时填写目标端口")
+        if tport and (not tport.isdigit() or not 0 < int(tport) < 65536):
+            return bad("目标端口应为 1-65535 的数字")
+        if self._create_session(proto, lhost, lport, thost, tport):
+            dlg.destroy()
         else:
-            self.chan_var.set("")
+            err.set(self.status_var.get())      # 失败原因已在状态栏
 
-    def _open_from_panel(self):
-        """「打开」按钮：按当前配置开通道（已存在则提示，不做开关切换）。"""
-        mode = self.mode_var.get()
-        if mode == "TCP Client":
-            self.status_var.set("TCP Client 请在下方「发起新会话」输入服务器地址连接")
+    # ---------------- 联系人右键菜单 ----------------
+
+    def _on_contact_menu(self, event):
+        """右键联系人：关闭所在通道 / 删除会话记录。"""
+        idx = self.contact_list.nearest(event.y)
+        if idx < 0 or idx >= len(self._convo_keys):
             return
-        proto = "udp" if mode == "UDP" else "tcps"
-        cid = self._cid(proto, self.local_host.get().strip(),
-                        self.local_port.get().strip())
+        ckey = self._convo_keys[idx]
+        self._select_convo(ckey)
+        cid = self._chan_of(ckey)
+        menu = tk.Menu(self.root, tearoff=0)
         if cid in self.channels:
-            self.status_var.set(f"通道已存在 [{self._cid_tag(cid)}]，"
-                                f"要关闭请在下方通道列表选择")
-            return
-        self._open_channel(proto, self.local_host.get().strip(),
-                           self.local_port.get().strip())
+            menu.add_command(label=f"关闭通道 {self._cid_tag(cid)}",
+                             command=lambda: self._close_channel(cid))
+        else:
+            menu.add_command(label="通道已关闭", state=tk.DISABLED)
+        menu.add_command(label="删除会话记录",
+                         command=lambda: self._delete_convo(ckey))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
 
-    def _close_selected_channel(self):
-        idx = self.chan_box.current()
-        if idx < 0 or idx >= len(self._chan_ids):
-            self.status_var.set("请先在下拉框选择要关闭的通道")
-            return
-        self._close_channel(self._chan_ids[idx])
+    def _delete_convo(self, ckey: str):
+        """删除会话记录：清聊天记录并从列表移除（不影响通道）。"""
+        self._convos.pop(ckey, None)
+        self._unread.pop(ckey, None)
+        if self.current_peer == ckey:
+            self.current_peer = None
+            self._clear_view()
+        self._refresh_contacts()
+        self.status_var.set(f"已删除会话 {self._display(ckey)}")
 
     def _cli_open(self):
-        """CLI --open：按当前模式建通道；--remote-* 目标建成会话/发起连接。"""
-        mode = self.mode_var.get()
+        """CLI --open：按 _cli_cfg 建通道/会话。"""
+        cfg = self._cli_cfg
+        mode = cfg.get("mode") or "TCP Server"
+        target = cfg.get("target")
         if mode == "TCP Client":
-            if self._pending_target:
-                host, port = self._pending_target.rsplit(":", 1)
-                ckey = self._connect_tcp_client(host, int(port))
-                if ckey:
-                    self._select_convo(ckey)
-        else:
-            proto = "udp" if mode == "UDP" else "tcps"
-            cid = self._open_channel(proto, self.local_host.get().strip(),
-                                     self.local_port.get().strip())
-            if cid and self._pending_target and mode == "UDP":
-                ckey = f"{cid}|{self._pending_target}"
-                self._ensure_convo(ckey)
-                self._select_convo(ckey)
-        self._pending_target = None
+            if target:
+                h, pt = target.rsplit(":", 1)
+                self._create_session("tcpc", "", "", h, pt)
+            return
+        proto = "udp" if mode == "UDP" else "tcps"
+        lhost = cfg.get("lhost") or detect_local_ips()[0]
+        lport = str(cfg.get("lport") or "9000")
+        thost = tport = ""
+        if target and proto == "udp":
+            thost, tport = target.rsplit(":", 1)
+        self._create_session(proto, lhost, lport, thost, tport)
 
     def _open_channel(self, proto: str, lhost: str, lport: str):
         """打开一个通道（UDP 绑定 / TCP 监听）；多个通道可并存。"""
@@ -891,7 +947,6 @@ class NetTesterGUI:
         self.channels[cid] = w
         self._ensure_convo(f"{cid}|*")          # 该通道的群发会话
         self._refresh_contacts()
-        self._refresh_chan_box()
         self._refresh_ignore_cache()
         self.status_var.set(
             f"通道已打开 [{self._cid_tag(cid)}]，共 {len(self.channels)} 个")
@@ -904,7 +959,6 @@ class NetTesterGUI:
         w.stop()
         # 会话与聊天记录保留（类微信），群发项随通道消失、重开时恢复
         self._refresh_contacts()
-        self._refresh_chan_box()
         self._log_event(f"--- 通道已关闭 [{self._cid_tag(cid)}] ---")
         if not self.channels:
             self.status_var.set("全部通道已关闭")
@@ -922,7 +976,6 @@ class NetTesterGUI:
                                 lambda t, c=cid: self._q_event(c, t))
             w.start()
             self.channels[cid] = w
-            self._refresh_chan_box()
             self.status_var.set(f"通道已打开 [TCP]，共 {len(self.channels)} 个")
         try:
             w.connect(host, port)
@@ -931,7 +984,6 @@ class NetTesterGUI:
             if not w.conn_keys():               # 空通道不留
                 self.channels.pop(cid, None)
                 w.stop()
-                self._refresh_chan_box()
             return None
         ckey = f"{cid}|{host}:{port}"
         self._ensure_convo(ckey)
@@ -959,7 +1011,7 @@ class NetTesterGUI:
         return keys
 
     def _refresh_contacts(self):
-        """重建联系人列表，保持当前选中态。"""
+        """重建联系人列表，保持当前选中态，并同步聊天区标题。"""
         keys = self._all_convo_keys()
         self._convo_keys = keys
         self.contact_list.delete(0, tk.END)
@@ -971,48 +1023,14 @@ class NetTesterGUI:
             idx = keys.index(self.current_peer)
             self.contact_list.selection_set(idx)
             self.contact_list.see(idx)
+            self.convo_title.config(text=self._display(self.current_peer))
+        else:
+            self.convo_title.config(text="未选择会话（点击 ＋发起新会话 开始）")
 
     def _ensure_convo(self, ckey: str) -> bool:
         is_new = ckey not in self._convos
         self._convos.setdefault(ckey, [])
         return is_new
-
-    def _add_target(self):
-        """主动发起会话：UDP=在当前本地地址对应的通道下添加目标（通道不存在
-        则自动打开）；TCP Client=连接新服务器。可逗号分隔多个。"""
-        mode = self.mode_var.get()
-        if mode == "TCP Server":
-            self.status_var.set("TCP Server 的对端由客户端连入决定，无法主动添加")
-            return
-        text = self.new_peer.get().strip()
-        if not text:
-            return
-        added = []
-        for part in re.split(r"[,，;；\s]+", text):
-            if not part:
-                continue
-            m = re.match(r"^(\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})$", part)
-            if not m or not (0 < int(m.group(2)) < 65536):
-                self.status_var.set(f"地址格式不正确: {part}（应为 IP:端口）")
-                return
-            host, port = m.group(1), int(m.group(2))
-            if mode == "UDP":
-                cid = self._open_channel("udp", self.local_host.get().strip(),
-                                         self.local_port.get().strip())
-                if not cid:
-                    return          # 通道打开失败（端口占用等），错误已提示
-                ckey = f"{cid}|{host}:{port}"
-                self._ensure_convo(ckey)
-            else:                   # TCP Client
-                ckey = self._connect_tcp_client(host, port)
-                if not ckey:
-                    continue        # 连接失败，状态栏已提示
-            added.append(ckey)
-        if not added:
-            return
-        self.new_peer.delete(0, tk.END)
-        self._select_convo(added[-1])      # 选中最后添加的目标
-        self.status_var.set(f"已添加 {len(added)} 个会话")
 
     def _on_contact_pick(self, _event=None):
         sel = self.contact_list.curselection()
@@ -1281,14 +1299,14 @@ class NetTesterGUI:
             tx_rate = (self.tx_bytes - self._last_tx) / dt
             rx_rate = (self.rx_bytes - self._last_rx) / dt
             self.rate_lbl.config(
-                text=f"速率 ↑ {pretty_bytes(tx_rate)}/s  ↓ {pretty_bytes(rx_rate)}/s")
+                text=f"↑ {pretty_bytes(tx_rate)}/s ↓ {pretty_bytes(rx_rate)}/s")
             self._last_rate_t = now
             self._last_tx = self.tx_bytes
             self._last_rx = self.rx_bytes
         self.stats_tx_lbl.config(
-            text=f"发送: {pretty_bytes(self.tx_bytes)} / {self.tx_pkts} 包")
+            text=f"↑ {pretty_bytes(self.tx_bytes)} / {self.tx_pkts} 包")
         self.stats_rx_lbl.config(
-            text=f"接收: {pretty_bytes(self.rx_bytes)} / {self.rx_pkts} 包")
+            text=f"↓ {pretty_bytes(self.rx_bytes)} / {self.rx_pkts} 包")
         self.root.after(500, self._update_stats)
 
     # ---------------- 退出 ----------------
@@ -1313,23 +1331,17 @@ def main():
     p.add_argument("--open", action="store_true", help="启动后立即打开连接")
     args = p.parse_args()
 
-    def set_entry(entry, val):
-        entry.delete(0, tk.END)
-        entry.insert(0, str(val))
-
     root = tk.Tk()
     apply_modern_theme(root)
     gui = NetTesterGUI(root)
-    if args.mode:
-        gui.mode_var.set(args.mode)
-        gui._on_mode_change()
-    if args.local_host:
-        set_entry(gui.local_host, args.local_host)
-    if args.local_port:
-        set_entry(gui.local_port, args.local_port)
-    if args.remote_host and args.remote_port and args.mode in ("UDP", "TCP Client"):
-        # 无目标地址栏：CLI 目标在打开时自动建成会话（UDP）或发起连接（TCP Client）
-        gui._pending_target = f"{args.remote_host}:{args.remote_port}"
+    # --open 时直接按参数建会话；否则作为「发起新会话」对话框的默认预填
+    gui._cli_cfg = {
+        "mode": args.mode,
+        "lhost": args.local_host,
+        "lport": args.local_port,
+        "target": f"{args.remote_host}:{args.remote_port}"
+                  if args.remote_host and args.remote_port else None,
+    }
     if args.open:
         root.after(100, gui._cli_open)
     root.mainloop()

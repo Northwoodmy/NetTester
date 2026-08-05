@@ -1,25 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""验证 UDP 打开/关闭/重开流程：按钮状态、端口立即释放、快速重开。"""
+"""通道打开/关闭/重开回归测试：端口释放竞态 & 会话创建入口。
 
-import errno
+历史 bug：关闭通道后立刻重开报 EADDRINUSE（worker 线程尚未释放端口）。
+现入口为 _create_session（对话框/CLI 共用），关闭走 _close_channel。
+"""
+
 import os
 import socket
-import sys
-import traceback
 import tkinter as tk
 
 import net_tester
 from net_tester import NetTesterGUI
 
 
-class FakeMessageBox:                     # 不弹模态对话框，避免阻塞事件循环
+class FakeMessageBox:
     errors = []
 
     @staticmethod
     def showerror(title, msg):
         FakeMessageBox.errors.append((title, msg))
-        print(f"[对话框] {title}: {msg.splitlines()[0]}")
+
+    @staticmethod
+    def showinfo(title, msg):
+        pass
 
 
 net_tester.messagebox = FakeMessageBox
@@ -28,73 +32,77 @@ net_tester.messagebox = FakeMessageBox
 def free_port():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.bind(("127.0.0.1", 0))
-    p = s.getsockname()[1]
+    port = s.getsockname()[1]
     s.close()
-    return p
-
-
-PORT = free_port()
-root = tk.Tk()
-gui = NetTesterGUI(root)
-
-CID = f"udp:127.0.0.1:{PORT}"
-gui.mode_var.set("UDP")
-gui._on_mode_change()
-for entry, val in ((gui.local_host, "127.0.0.1"), (gui.local_port, str(PORT))):
-    entry.delete(0, tk.END)
-    entry.insert(0, val)
+    return port
 
 
 def port_is_busy(port):
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)   # 无 SO_REUSEADDR 探针
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.bind(("127.0.0.1", port))
         return False
-    except OSError as e:
-        return e.errno == errno.EADDRINUSE
+    except OSError:
+        return True
     finally:
         s.close()
 
 
+PORT = free_port()
+CID = f"udp:127.0.0.1:{PORT}"
+GROUP = f"{CID}|*"
+
+root = tk.Tk()
+gui = NetTesterGUI(root)
+steps = []
+
+
 def step(fn):
-    """失败立即终止，不让 mainloop 空转。"""
-    try:
-        fn()
-    except Exception:
-        traceback.print_exc()
-        root.destroy()
-        os._exit(1)
+    steps.append(fn)
 
 
 def step_open():
-    gui._open_from_panel()
-    assert CID in gui.channels, "打开失败"
-    assert gui._chan_ids == [CID], f"通道列表应显示新通道: {gui._chan_ids}"
-    assert port_is_busy(PORT), "打开后端口应处于绑定状态"
-    print("PASS 通道打开，通道列表可见，端口已绑定")
-    root.after(50, lambda: step(step_close))
+    assert gui._create_session("udp", "127.0.0.1", str(PORT)), "打开失败"
+    assert CID in gui.channels, "通道未注册"
+    assert gui.current_peer == GROUP, "无目标会话应选中群发项"
+    assert port_is_busy(PORT), "打开后端口应被占用"
+    step(step_close)
 
 
 def step_close():
-    gui._close_selected_channel()       # 从通道列表关闭
-    assert CID not in gui.channels, "关闭后通道应移除"
-    assert gui._chan_ids == [], "关闭后通道列表应为空"
-    assert not port_is_busy(PORT), "关闭后端口应立即释放"   # 竞态回归项
-    print("PASS 关闭后按钮恢复'打开'，端口立即释放")
-    root.after(50, lambda: step(step_reopen))
+    gui._close_channel(CID)
+    assert CID not in gui.channels, "通道未移除"
+    assert not port_is_busy(PORT), "关闭后端口应立即释放（竞态回归）"
+    step(step_reopen)
 
 
 def step_reopen():
-    gui._open_from_panel()              # 关闭后立刻重开（旧 bug 在此报 EADDRINUSE）
-    assert CID in gui.channels, f"重开失败: {FakeMessageBox.errors}"
-    assert port_is_busy(PORT)
-    gui._close_selected_channel()
+    # 关闭后立刻重开同一端口：旧 bug 在此报 EADDRINUSE
+    assert gui._create_session("udp", "127.0.0.1", str(PORT)), \
+        f"重开失败: {FakeMessageBox.errors}"
+    assert CID in gui.channels
+    gui._close_channel(CID)
     assert CID not in gui.channels
-    print("PASS 关闭后可立刻重新打开")
+    # TCP Server 通道同样走 _create_session
+    assert gui._create_session("tcps", "127.0.0.1", str(PORT)), "TCP 监听失败"
+    cid2 = f"tcps:127.0.0.1:{PORT}"
+    assert cid2 in gui.channels
+    gui._close_channel(cid2)
+    assert not FakeMessageBox.errors, f"不应有错误弹窗: {FakeMessageBox.errors}"
     root.destroy()
-    print("UDP 打开/关闭/重开测试全部通过")
+    print("通道打开/关闭/重开测试通过（UDP + TCP Server）")
 
 
-root.after(100, lambda: step(step_open))
-root.after(10000, lambda: (print("TIMEOUT"), os._exit(2)))
+def runner():
+    if not steps:
+        root.after(30, runner)
+        return
+    fn = steps.pop(0)
+    fn()
+    root.after(30, runner)
+
+
+root.after(50, step_open)
+root.after(30, runner)
+root.after(8000, lambda: (print("TIMEOUT"), os._exit(2)))
 root.mainloop()
