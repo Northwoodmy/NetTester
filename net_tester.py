@@ -604,12 +604,7 @@ class NetTesterGUI:
         right = ttk.Frame(main)
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # 发送区先按底部占位（窗口高度不足时优先保住，不被接收区挤掉）
-        tx_frame = ttk.LabelFrame(right, text=" 发送 ", padding=4,
-                                  style="Orange.TLabelframe")
-        tx_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(6, 0))
-
-        # 会话区（类微信：左联系人列表，右气泡聊天记录）
+        # 会话区（类微信：左联系人列表，右对话面板 = 气泡 + 输入合并）
         rx_frame = ttk.LabelFrame(right, text=" 会话 ", padding=4,
                                   style="Green.TLabelframe")
         rx_frame.pack(fill=tk.BOTH, expand=True)
@@ -630,11 +625,72 @@ class NetTesterGUI:
         self.contact_list.bind("<<ListboxSelect>>", self._on_contact_pick)
         ttk.Separator(chat_box, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y)
 
+        # 右侧对话面板：顶部显示选项，中间气泡，底部输入区
+        conv_col = ttk.Frame(chat_box)
+        conv_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # —— 底部输入区先按底打包（窗口变矮时优先保住，不被气泡区挤掉）——
+        tx_opt = ttk.Frame(conv_col)
+        tx_opt.pack(side=tk.BOTTOM, fill=tk.X, pady=(2, 0))
+        self.tx_hex_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(tx_opt, text="HEX 发送", variable=self.tx_hex_var).pack(side=tk.LEFT)
+        self.loop_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(tx_opt, text="定时发送", variable=self.loop_var,
+                        command=self._toggle_loop).pack(side=tk.LEFT, padx=6)
+        self.loop_ms = ttk.Entry(tx_opt, width=6)
+        self.loop_ms.insert(0, "1000")
+        self.loop_ms.pack(side=tk.LEFT)
+        ttk.Label(tx_opt, text="ms").pack(side=tk.LEFT, padx=(2, 8))
+        self.loop_rand_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(tx_opt, text="循环发随机包", variable=self.loop_rand_var).pack(side=tk.LEFT)
+        self.send_btn = ttk.Button(tx_opt, text="发送", style="Accent.TButton",
+                                   command=lambda: self._send(random_pkt=False))
+        self.send_btn.pack(side=tk.RIGHT)
+
+        self.tx_text = tk.Text(conv_col, height=4, font=(MONO_FONT, 10), **TEXT_STYLE)
+        self.tx_text.pack(side=tk.BOTTOM, fill=tk.X, pady=2)
+        self.tx_text.bind("<Control-Return>",
+                          lambda _e: self._send(random_pkt=False))
+
+        ui_font = "Segoe UI" if IS_WIN else "Noto Sans CJK SC"
+        ttk.Label(conv_col, text="输入文本（HEX 发送则填十六进制，"
+                                 "如 DE AD BE EF；Ctrl+Enter 发送）",
+                  font=(ui_font, 8),
+                  foreground=PALETTE["subtle"]).pack(side=tk.BOTTOM, anchor=tk.W)
+
+        rand_row = ttk.Frame(conv_col)
+        rand_row.pack(side=tk.BOTTOM, fill=tk.X, pady=(4, 2))
+        ttk.Label(rand_row, text="随机包大小").pack(side=tk.LEFT)
+        self.rand_size = ttk.Entry(rand_row, width=8)
+        self.rand_size.insert(0, "512")
+        self.rand_size.pack(side=tk.LEFT, padx=4)
+        ttk.Label(rand_row, text="字节").pack(side=tk.LEFT)
+        self.rand_btn = ttk.Button(rand_row, text="发送随机包", style="Green.TButton",
+                                   command=lambda: self._send(random_pkt=True))
+        self.rand_btn.pack(side=tk.LEFT, padx=10)
+
+        # —— 顶部显示选项工具条 ——
+        rx_opt = ttk.Frame(conv_col)
+        rx_opt.pack(fill=tk.X, pady=(0, 2))
+        self.rx_hex_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(rx_opt, text="HEX 显示", variable=self.rx_hex_var,
+                        command=self._rerender).pack(side=tk.LEFT)
+        self.rx_ts_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(rx_opt, text="时间戳", variable=self.rx_ts_var,
+                        command=self._rerender).pack(side=tk.LEFT, padx=6)
+        self.rx_pause_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(rx_opt, text="暂停显示", variable=self.rx_pause_var).pack(side=tk.LEFT)
+        self.rx_ignore_local_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(rx_opt, text="忽略本机来源",
+                        variable=self.rx_ignore_local_var,
+                        command=self._refresh_ignore_cache).pack(side=tk.LEFT, padx=6)
+        ttk.Button(rx_opt, text="清空", command=self._clear_rx).pack(side=tk.RIGHT)
+
+        # —— 中间气泡聊天记录 ——
         self.rx_text = scrolledtext.ScrolledText(
-            chat_box, state=tk.DISABLED, font=(MONO_FONT, 10), wrap=tk.CHAR,
+            conv_col, state=tk.DISABLED, font=(MONO_FONT, 10), wrap=tk.CHAR,
             height=12, **{**TEXT_STYLE, "bg": "#F5F5F5"})
         self.rx_text.pack(fill=tk.BOTH, expand=True)
-        ui_font = "Segoe UI" if IS_WIN else "Noto Sans CJK SC"
         t = self.rx_text
         # 气泡：收到=左白，发出=右绿（微信配色）；meta=灰小字；sys=居中灰字
         t.tag_configure("rx", background="#FFFFFF", lmargin1=6, lmargin2=6,
@@ -659,59 +715,6 @@ class NetTesterGUI:
         self.new_peer.bind("<Return>", lambda _e: self._add_target())
         ttk.Button(add_line, text="添加", width=4,
                    command=self._add_target).pack(side=tk.RIGHT)
-
-        rx_opt = ttk.Frame(rx_frame)
-        rx_opt.pack(fill=tk.X, pady=(4, 0))
-        self.rx_hex_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(rx_opt, text="HEX 显示", variable=self.rx_hex_var,
-                        command=self._rerender).pack(side=tk.LEFT)
-        self.rx_ts_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(rx_opt, text="时间戳", variable=self.rx_ts_var,
-                        command=self._rerender).pack(side=tk.LEFT, padx=6)
-        self.rx_pause_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(rx_opt, text="暂停显示", variable=self.rx_pause_var).pack(side=tk.LEFT)
-        self.rx_ignore_local_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(rx_opt, text="忽略本机来源",
-                        variable=self.rx_ignore_local_var,
-                        command=self._refresh_ignore_cache).pack(side=tk.LEFT, padx=6)
-        ttk.Button(rx_opt, text="清空", command=self._clear_rx).pack(side=tk.RIGHT)
-
-        # 发送区（框架已在上方按底部打包）
-        rand_row = ttk.Frame(tx_frame)
-        rand_row.pack(fill=tk.X, pady=2)
-        ttk.Label(rand_row, text="随机包大小").pack(side=tk.LEFT)
-        self.rand_size = ttk.Entry(rand_row, width=8)
-        self.rand_size.insert(0, "512")
-        self.rand_size.pack(side=tk.LEFT, padx=4)
-        ttk.Label(rand_row, text="字节").pack(side=tk.LEFT)
-        self.rand_btn = ttk.Button(rand_row, text="发送随机包", style="Green.TButton",
-                                   command=lambda: self._send(random_pkt=True))
-        self.rand_btn.pack(side=tk.LEFT, padx=10)
-
-        ttk.Label(tx_frame, text="手动输入（填文本；勾选 HEX 发送则填十六进制，"
-                                 "如 DE AD BE EF；Ctrl+Enter 快捷发送）:"
-                  ).pack(anchor=tk.W, pady=(6, 0))
-        self.tx_text = tk.Text(tx_frame, height=4, font=(MONO_FONT, 10), **TEXT_STYLE)
-        self.tx_text.pack(fill=tk.X, pady=2)
-        self.tx_text.bind("<Control-Return>",
-                          lambda _e: self._send(random_pkt=False))
-
-        tx_opt = ttk.Frame(tx_frame)
-        tx_opt.pack(fill=tk.X, pady=2)
-        self.tx_hex_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(tx_opt, text="HEX 发送", variable=self.tx_hex_var).pack(side=tk.LEFT)
-        self.loop_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(tx_opt, text="定时发送", variable=self.loop_var,
-                        command=self._toggle_loop).pack(side=tk.LEFT, padx=6)
-        self.loop_ms = ttk.Entry(tx_opt, width=6)
-        self.loop_ms.insert(0, "1000")
-        self.loop_ms.pack(side=tk.LEFT)
-        ttk.Label(tx_opt, text="ms").pack(side=tk.LEFT, padx=(2, 8))
-        self.loop_rand_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(tx_opt, text="循环发随机包", variable=self.loop_rand_var).pack(side=tk.LEFT)
-        self.send_btn = ttk.Button(tx_opt, text="发送", style="Accent.TButton",
-                                   command=lambda: self._send(random_pkt=False))
-        self.send_btn.pack(side=tk.RIGHT)
 
         self._on_mode_change()
 
