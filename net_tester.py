@@ -337,6 +337,114 @@ class TCPServerWorker(BaseWorker):
 
 
 # ---------------------------------------------------------------------------
+# 现代化深色主题 + 毛玻璃
+# ---------------------------------------------------------------------------
+
+PALETTE = {
+    "bg":           "#1e1e2e",   # 主背景
+    "surface":      "#2a2b3d",   # 按钮/控件
+    "field":        "#14141f",   # 输入框/文本区
+    "fg":           "#cdd6f4",   # 主文字
+    "subtle":       "#9399b2",   # 次要文字
+    "accent":       "#89b4fa",   # 强调色
+    "accent_hi":    "#b4befe",
+    "accent_press": "#74c7ec",
+    "disabled_bg":  "#1a1b26",
+    "disabled_fg":  "#6c7086",
+}
+WINDOW_ALPHA = 0.95              # Linux/X11 毛玻璃：整窗半透明（Wayland 会忽略，1.0 关闭）
+
+
+def _win_glass(root):
+    """Windows 11 真毛玻璃：深色标题栏 + Acrylic 背景模糊（静默失败）。"""
+    try:
+        import ctypes
+        hwnd = ctypes.windll.user32.GetAncestor(root.winfo_id(), 2)   # GA_ROOT
+        dwm = ctypes.windll.dwmapi
+        dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(ctypes.c_int(1)), 4)  # 深色标题栏
+        ok = dwm.DwmSetWindowAttribute(hwnd, 38, ctypes.byref(ctypes.c_int(3)), 4)  # Acrylic
+        if ok != 0:
+            dwm.DwmSetWindowAttribute(hwnd, 38, ctypes.byref(ctypes.c_int(2)), 4)  # 退回 Mica
+    except Exception:
+        pass
+
+
+def apply_modern_theme(root):
+    p = PALETTE
+    ui_font = "Segoe UI" if IS_WIN else "Noto Sans CJK SC"
+    try:
+        from tkinter import font as tkfont
+        for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
+            tkfont.nametofont(name).configure(family=ui_font, size=10)
+    except tk.TclError:
+        pass
+    root.configure(bg=p["bg"])
+    s = ttk.Style(root)
+    try:
+        s.theme_use("clam")
+    except tk.TclError:
+        pass
+
+    s.configure(".", background=p["bg"], foreground=p["fg"],
+                fieldbackground=p["field"], bordercolor=p["bg"],
+                troughcolor=p["surface"], focuscolor=p["accent"])
+    s.configure("TFrame", background=p["bg"])
+    s.configure("TLabel", background=p["bg"], foreground=p["fg"])
+    s.configure("TLabelframe", background=p["bg"], bordercolor=p["surface"])
+    s.configure("TLabelframe.Label", background=p["bg"], foreground=p["accent"],
+                font=(ui_font, 10, "bold"))
+    s.configure("TButton", background=p["surface"], foreground=p["fg"],
+                borderwidth=0, padding=(12, 6), focusthickness=0)
+    s.map("TButton",
+          background=[("active", "#3b3d52"), ("pressed", p["accent"]),
+                      ("disabled", p["disabled_bg"])],
+          foreground=[("pressed", "#14141f"), ("disabled", p["disabled_fg"])])
+    s.configure("Accent.TButton", background=p["accent"], foreground="#14141f",
+                font=(ui_font, 10, "bold"))
+    s.map("Accent.TButton",
+          background=[("active", p["accent_hi"]), ("pressed", p["accent_press"]),
+                      ("disabled", p["disabled_bg"])],
+          foreground=[("disabled", p["disabled_fg"])])
+    s.configure("TEntry", fieldbackground=p["field"], foreground=p["fg"],
+                insertcolor=p["fg"], bordercolor=p["surface"], padding=4)
+    s.map("TEntry", fieldbackground=[("disabled", p["disabled_bg"])],
+          foreground=[("disabled", p["disabled_fg"])])
+    s.configure("TCombobox", fieldbackground=p["field"], foreground=p["fg"],
+                background=p["surface"], arrowcolor=p["fg"],
+                bordercolor=p["surface"], padding=4)
+    s.map("TCombobox",
+          fieldbackground=[("readonly", p["field"]), ("disabled", p["disabled_bg"])],
+          foreground=[("readonly", p["fg"]), ("disabled", p["disabled_fg"])],
+          arrowcolor=[("disabled", p["disabled_fg"])])
+    root.option_add("*TCombobox*Listbox.background", p["field"])
+    root.option_add("*TCombobox*Listbox.foreground", p["fg"])
+    root.option_add("*TCombobox*Listbox.selectBackground", p["accent"])
+    root.option_add("*TCombobox*Listbox.selectForeground", "#14141f")
+    s.configure("TCheckbutton", background=p["bg"], foreground=p["fg"])
+    s.map("TCheckbutton", background=[("active", p["bg"])],
+          indicatorcolor=[("selected", p["accent"]), ("!selected", p["surface"])])
+    s.configure("TSeparator", background=p["surface"])
+    s.configure("Vertical.TScrollbar", background=p["surface"], troughcolor=p["bg"],
+                bordercolor=p["bg"], arrowcolor=p["fg"])
+    s.configure("Status.TLabel", background="#14141f", foreground=p["subtle"])
+
+    # 毛玻璃
+    if IS_WIN:
+        _win_glass(root)
+    elif WINDOW_ALPHA < 1.0:
+        try:
+            root.attributes("-alpha", WINDOW_ALPHA)
+        except tk.TclError:
+            pass
+
+
+TEXT_STYLE = dict(bg="#14141f", fg="#cdd6f4", insertbackground="#cdd6f4",
+                  selectbackground="#313244", relief="flat", padx=8, pady=6,
+                  highlightthickness=1, highlightbackground="#313244",
+                  highlightcolor="#89b4fa")
+
+
+# ---------------------------------------------------------------------------
 # GUI 层
 # ---------------------------------------------------------------------------
 
@@ -405,7 +513,8 @@ class NetTesterGUI:
         self.remote_port.insert(0, "9000")
         self.remote_port.grid(row=5, column=1, sticky=tk.W, padx=(4, 0))
 
-        self.open_btn = ttk.Button(left, text="打开", command=self._toggle_open)
+        self.open_btn = ttk.Button(left, text="打开", style="Accent.TButton",
+                                   command=self._toggle_open)
         self.open_btn.grid(row=6, column=0, columnspan=2, sticky=tk.EW, pady=(8, 2))
 
         self.client_lbl = ttk.Label(left, text="连接列表")
@@ -436,7 +545,8 @@ class NetTesterGUI:
         rx_frame = ttk.LabelFrame(right, text=" 接收 ", padding=4)
         rx_frame.pack(fill=tk.BOTH, expand=True)
         self.rx_text = scrolledtext.ScrolledText(rx_frame, state=tk.DISABLED,
-                                                 font=(MONO_FONT, 10), wrap=tk.NONE)
+                                                 font=(MONO_FONT, 10), wrap=tk.NONE,
+                                                 **TEXT_STYLE)
         self.rx_text.pack(fill=tk.BOTH, expand=True)
 
         rx_opt = ttk.Frame(rx_frame)
@@ -467,7 +577,7 @@ class NetTesterGUI:
         ttk.Label(tx_frame, text="手动输入（填文本；勾选 HEX 发送则填十六进制，"
                                  "如 DE AD BE EF；Ctrl+Enter 快捷发送）:"
                   ).pack(anchor=tk.W, pady=(6, 0))
-        self.tx_text = tk.Text(tx_frame, height=4, font=(MONO_FONT, 10))
+        self.tx_text = tk.Text(tx_frame, height=4, font=(MONO_FONT, 10), **TEXT_STYLE)
         self.tx_text.pack(fill=tk.X, pady=2)
         self.tx_text.bind("<Control-Return>",
                           lambda _e: self._send(random_pkt=False))
@@ -485,14 +595,14 @@ class NetTesterGUI:
         ttk.Label(tx_opt, text="ms").pack(side=tk.LEFT, padx=(2, 8))
         self.loop_rand_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(tx_opt, text="循环发随机包", variable=self.loop_rand_var).pack(side=tk.LEFT)
-        self.send_btn = ttk.Button(tx_opt, text="发送",
+        self.send_btn = ttk.Button(tx_opt, text="发送", style="Accent.TButton",
                                    command=lambda: self._send(random_pkt=False))
         self.send_btn.pack(side=tk.RIGHT)
 
         # 状态栏
         self.status_var = tk.StringVar(value="就绪")
-        ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN,
-                  anchor=tk.W, padding=(6, 2)).pack(fill=tk.X, side=tk.BOTTOM)
+        ttk.Label(self.root, textvariable=self.status_var, style="Status.TLabel",
+                  anchor=tk.W, padding=(8, 3)).pack(fill=tk.X, side=tk.BOTTOM)
 
         self._on_mode_change()
 
@@ -799,10 +909,7 @@ def main():
         entry.insert(0, str(val))
 
     root = tk.Tk()
-    try:
-        ttk.Style().theme_use("clam")
-    except tk.TclError:
-        pass
+    apply_modern_theme(root)
     gui = NetTesterGUI(root)
     if args.mode:
         gui.mode_var.set(args.mode)
