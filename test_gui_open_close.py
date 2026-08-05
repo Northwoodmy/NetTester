@@ -37,6 +37,7 @@ PORT = free_port()
 root = tk.Tk()
 gui = NetTesterGUI(root)
 
+CID = f"udp:127.0.0.1:{PORT}"
 gui.mode_var.set("UDP")
 gui._on_mode_change()
 for entry, val in ((gui.local_host, "127.0.0.1"), (gui.local_port, str(PORT))):
@@ -67,7 +68,7 @@ def step(fn):
 
 def step_open():
     gui._toggle_open()
-    assert gui.worker is not None, "打开失败"
+    assert CID in gui.channels, "打开失败"
     assert gui.open_btn.cget("text") == "关闭", f"按钮文本: {gui.open_btn.cget('text')}"
     assert port_is_busy(PORT), "打开后端口应处于绑定状态"
     print("PASS 打开后按钮变为'关闭'，端口已绑定")
@@ -76,7 +77,7 @@ def step_open():
 
 def step_close():
     gui._toggle_open()
-    assert gui.worker is None, "关闭后 worker 应清空"
+    assert CID not in gui.channels, "关闭后通道应移除"
     assert gui.open_btn.cget("text") == "打开", f"按钮文本: {gui.open_btn.cget('text')}"
     assert not port_is_busy(PORT), "关闭后端口应立即释放"   # 竞态回归项
     print("PASS 关闭后按钮恢复'打开'，端口立即释放")
@@ -85,10 +86,10 @@ def step_close():
 
 def step_reopen():
     gui._toggle_open()                    # 关闭后立刻重开（旧 bug 在此报 EADDRINUSE）
-    assert gui.worker is not None, f"重开失败: {FakeMessageBox.errors}"
+    assert CID in gui.channels, f"重开失败: {FakeMessageBox.errors}"
     assert port_is_busy(PORT)
     gui._toggle_open()
-    assert gui.worker is None
+    assert CID not in gui.channels
     print("PASS 关闭后可立刻重新打开")
     root.destroy()
     print("UDP 打开/关闭/重开测试全部通过")

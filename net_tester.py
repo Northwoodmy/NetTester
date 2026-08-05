@@ -534,18 +534,19 @@ class NetTesterGUI:
         self.root = root
         root.title("TCP/UDP 网络测试工具")
 
-        self.worker: BaseWorker | None = None
+        self.channels = {}               # 通道 cid -> worker；cid = 协议:地址:端口
         self.msg_queue: queue.Queue = queue.Queue()
-        self._peers = []                 # UDP 模式下见过的来源地址
         self._local_ips = set()          # 本机 IP 缓存（"忽略本机来源"用）
 
         # 会话（类微信：每个对端地址 = 一个联系人，各自一份聊天记录）
-        self._convos = {}                # peer -> [(direction, data, time), ...]
-        self._convo_keys = []            # 联系人列表行对应的 peer key
-        self._unread = {}                # peer -> 未读条数
-        self.current_peer = None         # 当前选中的会话（特殊会话见 _special_peer）
+        # 会话挂在通道上：ckey = f"{cid}|{对端}"，"|*" 为该通道的群发会话。
+        # 不同会话可属于不同协议、不同端口的通道。
+        self._convos = {}                # ckey -> [(direction, data, time), ...]
+        self._convo_keys = []            # 联系人列表行对应的 ckey
+        self._unread = {}                # ckey -> 未读条数
+        self.current_peer = None         # 当前选中的会话 ckey
         self._pending_target = None      # CLI --remote-* 指定的、待建成会话的目标
-        self._last_visible = None        # TCP Server 联系人列表变化检测缓存
+        self._last_visible = None        # 联系人列表变化检测缓存
 
         # 统计
         self.tx_bytes = 0
@@ -638,7 +639,7 @@ class NetTesterGUI:
         left_col = ttk.Frame(chat_box)
         left_col.pack(side=tk.LEFT, fill=tk.Y)
         self.contact_list = tk.Listbox(
-            left_col, width=20, bg="#FFFFFF", fg=PALETTE["fg"],
+            left_col, width=26, bg="#FFFFFF", fg=PALETTE["fg"],
             selectbackground=PALETTE["select"],
             selectforeground=PALETTE["accent_press"],
             relief="flat", highlightthickness=1,
@@ -751,78 +752,204 @@ class NetTesterGUI:
         if cur and cur not in ips:         # 保留手动输入的地址
             self.local_host.config(values=ips + [cur])
 
-    def _on_mode_change(self, reset=True):
+    def _on_mode_change(self):
         mode = self.mode_var.get()
         is_client = mode == "TCP Client"
         # 本地地址仅 TCP Client 用不到（对端由会话连接决定）
         for w in (self.local_host, self.local_port):
             w.config(state=tk.DISABLED if is_client else tk.NORMAL)
-        self.open_btn.config(text={"TCP Server": "开始监听", "TCP Client": "打开",
-                                   "UDP": "打开"}[mode])
         # 「发起新会话」：UDP=添加目标，TCP Client=连接新服务器；Server 的对端
-        # 由客户端连入决定，不能主动添加
+        # 由客户端连入决定，不能主动添加。切换模式不再清空会话/通道。
         if mode == "TCP Server":
             self.add_row.pack_forget()
         else:
             self.add_row.pack(fill=tk.X, pady=(4, 0))
-        if reset:
-            # 切换模式清空会话（不同模式的对端不混用）
-            self._convos.clear()
-            self._peers.clear()
-            self._unread.clear()
-            self.current_peer = None
-            self._clear_view()
+        self._sync_open_btn()
+
+    # ---------------- 通道管理（多通道并存：协议 + 本地端口） ----------------
+
+    @staticmethod
+    def _cid(proto: str, host: str, port) -> str:
+        return f"{proto}:{host}:{port}"
+
+    @staticmethod
+    def _cid_tag(cid: str) -> str:
+        proto, _h, p = cid.split(":", 2)
+        return {"udp": f"UDP·{p}", "tcps": f"TCP·{p}", "tcpc": "TCP"}[proto]
+
+    @staticmethod
+    def _peer_of(ckey: str) -> str:
+        return ckey.rsplit("|", 1)[1]
+
+    @staticmethod
+    def _chan_of(ckey: str) -> str:
+        return ckey.rsplit("|", 1)[0]
+
+    def _display(self, ckey: str) -> str:
+        """联系人显示名：对端 [协议·端口]；通道已关闭则标注。"""
+        cid, peer = ckey.rsplit("|", 1)
+        tag = self._cid_tag(cid)
+        if cid not in self.channels:
+            tag += "·已关闭"
+        return f"（群发）[{tag}]" if peer == "*" else f"{peer} [{tag}]"
+
+    def _sync_open_btn(self):
+        """打开按钮跟随当前配置：对应通道已存在则显示「关闭」。"""
+        mode = self.mode_var.get()
+        if mode == "TCP Client":
+            self.open_btn.config(text="打开")
+            return
+        proto = "udp" if mode == "UDP" else "tcps"
+        cid = self._cid(proto, self.local_host.get().strip(),
+                        self.local_port.get().strip())
+        if cid in self.channels:
+            self.open_btn.config(text="关闭")
+        else:
+            self.open_btn.config(text={"UDP": "打开", "TCP Server": "开始监听"}[mode])
+
+    def _toggle_open(self):
+        mode = self.mode_var.get()
+        if mode == "TCP Client":
+            self.status_var.set("TCP Client 请在下方「发起新会话」输入服务器地址连接")
+            return
+        proto = "udp" if mode == "UDP" else "tcps"
+        cid = self._cid(proto, self.local_host.get().strip(),
+                        self.local_port.get().strip())
+        if cid in self.channels:
+            self._close_channel(cid)
+        else:
+            self._open_channel(proto, self.local_host.get().strip(),
+                               self.local_port.get().strip())
+
+    def _cli_open(self):
+        """CLI --open：按当前模式建通道；--remote-* 目标建成会话/发起连接。"""
+        mode = self.mode_var.get()
+        if mode == "TCP Client":
+            if self._pending_target:
+                host, port = self._pending_target.rsplit(":", 1)
+                ckey = self._connect_tcp_client(host, int(port))
+                if ckey:
+                    self._select_convo(ckey)
+        else:
+            proto = "udp" if mode == "UDP" else "tcps"
+            cid = self._open_channel(proto, self.local_host.get().strip(),
+                                     self.local_port.get().strip())
+            if cid and self._pending_target and mode == "UDP":
+                ckey = f"{cid}|{self._pending_target}"
+                self._ensure_convo(ckey)
+                self._select_convo(ckey)
+        self._pending_target = None
+
+    def _open_channel(self, proto: str, lhost: str, lport: str):
+        """打开一个通道（UDP 绑定 / TCP 监听）；多个通道可并存。"""
+        cid = self._cid(proto, lhost, lport)
+        if cid in self.channels:
+            return cid
+        cb_data = lambda s, d, c=cid: self._q_data(c, s, d)
+        cb_evt = lambda t, c=cid: self._q_event(c, t)
+        try:
+            if proto == "udp":
+                w = UDPWorker(cb_data, cb_evt, lhost, int(lport), "127.0.0.1", 9)
+            else:
+                w = TCPServerWorker(cb_data, cb_evt, lhost, int(lport))
+            w.start()
+        except (ValueError, OSError) as e:
+            msg = str(e)
+            if isinstance(e, OSError) and e.errno == errno.EADDRINUSE:
+                msg += "\n\n" + self._port_owner_hint(lport)
+            messagebox.showerror("打开失败", msg)
+            self.status_var.set(f"错误: {e}")
+            return None
+        self.channels[cid] = w
+        self._ensure_convo(f"{cid}|*")          # 该通道的群发会话
         self._refresh_contacts()
+        self._sync_open_btn()
+        self._refresh_ignore_cache()
+        self.status_var.set(
+            f"通道已打开 [{self._cid_tag(cid)}]，共 {len(self.channels)} 个")
+        return cid
+
+    def _close_channel(self, cid: str):
+        w = self.channels.pop(cid, None)
+        if not w:
+            return
+        w.stop()
+        # 会话与聊天记录保留（类微信），群发项随通道消失、重开时恢复
+        self._refresh_contacts()
+        self._sync_open_btn()
+        self._log_event(f"--- 通道已关闭 [{self._cid_tag(cid)}] ---")
+        if not self.channels:
+            self.status_var.set("全部通道已关闭")
+
+    def _close_all_channels(self):
+        for cid in list(self.channels):
+            self._close_channel(cid)
+
+    def _connect_tcp_client(self, host: str, port: int):
+        """建立（或复用）到 host:port 的 TCP 通道并连接；成功返回会话 key。"""
+        cid = self._cid("tcpc", host, port)
+        w = self.channels.get(cid)
+        if w is None:
+            w = TCPClientWorker(lambda s, d, c=cid: self._q_data(c, s, d),
+                                lambda t, c=cid: self._q_event(c, t))
+            w.start()
+            self.channels[cid] = w
+            self.status_var.set(f"通道已打开 [TCP]，共 {len(self.channels)} 个")
+        try:
+            w.connect(host, port)
+        except OSError as e:
+            self.status_var.set(f"连接 {host}:{port} 失败: {e}")
+            if not w.conn_keys():               # 空通道不留
+                self.channels.pop(cid, None)
+                w.stop()
+            return None
+        ckey = f"{cid}|{host}:{port}"
+        self._ensure_convo(ckey)
+        return ckey
 
     # ---------------- 会话（联系人）管理 ----------------
 
-    def _special_peer(self):
-        """群发用的特殊会话名；TCP Client 没有。"""
-        return {"UDP": "（所有已知来源）",
-                "TCP Server": "（所有连接）"}.get(self.mode_var.get())
-
-    def _visible_peers(self):
-        """当前应显示在联系人列表里的对端（不含特殊项）。"""
-        mode = self.mode_var.get()
-        if mode == "UDP":
-            return list(self._peers)
-        # TCP：活跃连接 ∪ 有聊天记录的对端（断线会话保留记录，类微信）
-        worker = self.worker
-        if mode == "TCP Server":
-            keys = worker.client_keys() if isinstance(worker, TCPServerWorker) else []
-        else:
-            keys = worker.conn_keys() if isinstance(worker, TCPClientWorker) else []
-        hist = [k for k in self._convos if k != self._special_peer()]
-        return sorted(set(keys) | set(hist))
+    def _all_convo_keys(self):
+        """联系人列表：各通道群发项 -> 活跃连接 -> 历史会话（去重保序）。"""
+        keys = [f"{cid}|*" for cid in self.channels
+                if not cid.startswith("tcpc:")]
+        for cid, w in self.channels.items():
+            if isinstance(w, TCPServerWorker):
+                cand = [f"{cid}|{k}" for k in w.client_keys()]
+            elif isinstance(w, TCPClientWorker):
+                cand = [f"{cid}|{k}" for k in w.conn_keys()]
+            else:
+                cand = []
+            for k in cand:
+                if k not in keys:
+                    keys.append(k)
+        for k in self._convos:
+            if not k.endswith("|*") and k not in keys:
+                keys.append(k)
+        return keys
 
     def _refresh_contacts(self):
-        """重建联系人列表：特殊项（群发）在前，保持当前选中态。"""
-        special = self._special_peer()
-        keys = ([special] if special else []) + self._visible_peers()
+        """重建联系人列表，保持当前选中态。"""
+        keys = self._all_convo_keys()
         self._convo_keys = keys
         self.contact_list.delete(0, tk.END)
         for k in keys:
             n = self._unread.get(k, 0)
-            self.contact_list.insert(tk.END, f"{k}  [{n}]" if n else k)
+            disp = self._display(k)
+            self.contact_list.insert(tk.END, f"{disp}  [{n}]" if n else disp)
         if self.current_peer in keys:
             idx = keys.index(self.current_peer)
             self.contact_list.selection_set(idx)
             self.contact_list.see(idx)
 
-    def _ensure_convo(self, peer: str) -> bool:
-        """确保会话存在；UDP 下来源同时进 peers 列表。返回是否新建。"""
-        is_new = peer not in self._convos
-        self._convos.setdefault(peer, [])
-        if self.mode_var.get() == "UDP" and peer != self._special_peer() \
-                and peer not in self._peers:
-            self._peers.append(peer)
-            if len(self._peers) > 50:
-                self._peers = self._peers[-50:]
-            is_new = True
+    def _ensure_convo(self, ckey: str) -> bool:
+        is_new = ckey not in self._convos
+        self._convos.setdefault(ckey, [])
         return is_new
 
     def _add_target(self):
-        """主动发起会话：UDP=添加目标；TCP Client=连接新服务器。可逗号分隔多个。"""
+        """主动发起会话：UDP=在当前本地地址对应的通道下添加目标（通道不存在
+        则自动打开）；TCP Client=连接新服务器。可逗号分隔多个。"""
         mode = self.mode_var.get()
         if mode == "TCP Server":
             self.status_var.set("TCP Server 的对端由客户端连入决定，无法主动添加")
@@ -838,23 +965,24 @@ class NetTesterGUI:
             if not m or not (0 < int(m.group(2)) < 65536):
                 self.status_var.set(f"地址格式不正确: {part}（应为 IP:端口）")
                 return
-            peer = f"{m.group(1)}:{int(m.group(2))}"
-            if mode == "TCP Client":
-                if not self.worker:
-                    self.status_var.set("请先打开")
-                    return
-                try:
-                    self.worker.connect(m.group(1), int(m.group(2)))
-                except OSError as e:
-                    self.status_var.set(f"连接 {peer} 失败: {e}")
-                    continue
-            self._ensure_convo(peer)
-            added.append(peer)
+            host, port = m.group(1), int(m.group(2))
+            if mode == "UDP":
+                cid = self._open_channel("udp", self.local_host.get().strip(),
+                                         self.local_port.get().strip())
+                if not cid:
+                    return          # 通道打开失败（端口占用等），错误已提示
+                ckey = f"{cid}|{host}:{port}"
+                self._ensure_convo(ckey)
+            else:                   # TCP Client
+                ckey = self._connect_tcp_client(host, port)
+                if not ckey:
+                    continue        # 连接失败，状态栏已提示
+            added.append(ckey)
         if not added:
             return
         self.new_peer.delete(0, tk.END)
         self._select_convo(added[-1])      # 选中最后添加的目标
-        self.status_var.set(f"已添加 {len(added)} 个目标: {'、'.join(added)}")
+        self.status_var.set(f"已添加 {len(added)} 个会话")
 
     def _on_contact_pick(self, _event=None):
         sel = self.contact_list.curselection()
@@ -867,69 +995,6 @@ class NetTesterGUI:
         self._unread.pop(peer, None)
         self._refresh_contacts()
         self._render_chat(peer)
-
-    def _toggle_open(self):
-        if self.worker:
-            self._close_worker()
-        else:
-            self._open_worker()
-
-    def _open_worker(self):
-        mode = self.mode_var.get()
-        try:
-            if mode == "UDP":
-                # 构造时的初始目标仅是占位，实际发送目标由当前会话决定
-                w = UDPWorker(self._q_data, self._q_event,
-                              self.local_host.get().strip(),
-                              int(self.local_port.get()),
-                              "127.0.0.1", 9)
-            elif mode == "TCP Client":
-                w = TCPClientWorker(self._q_data, self._q_event)
-            else:
-                w = TCPServerWorker(self._q_data, self._q_event,
-                                    self.local_host.get().strip(),
-                                    int(self.local_port.get()))
-            w.start()
-        except (ValueError, OSError) as e:
-            msg = str(e)
-            if isinstance(e, OSError) and e.errno == errno.EADDRINUSE:
-                msg += "\n\n" + self._port_owner_hint(self.local_port.get())
-            messagebox.showerror("打开失败", msg)
-            self.status_var.set(f"错误: {e}")
-            return
-        self.worker = w
-        self.open_btn.config(text="关闭")
-        self.mode_box.config(state=tk.DISABLED)
-        self._refresh_ignore_cache()
-        # 恢复当前会话（历史会话保留，类微信：关闭/重开不丢聊天记录）
-        if mode == "TCP Client":
-            if self._pending_target:      # CLI --remote-* 指定的服务器
-                host, port = self._pending_target.rsplit(":", 1)
-                try:
-                    w.connect(host, int(port))
-                    self._ensure_convo(self._pending_target)
-                    self.current_peer = self._pending_target
-                except OSError as e:
-                    self._log_event(f"连接 {self._pending_target} 失败: {e}")
-                self._pending_target = None
-            elif self.current_peer is None and self._visible_peers():
-                self.current_peer = self._visible_peers()[0]
-        elif mode == "TCP Server":
-            self.current_peer = self._special_peer()
-            self._ensure_convo(self.current_peer)
-        elif mode == "UDP":
-            if self._pending_target:      # CLI --remote-* 指定的目标，建成会话
-                self._ensure_convo(self._pending_target)
-                self.current_peer = self._pending_target
-                self._pending_target = None
-            elif self.current_peer is None and self._peers:
-                self.current_peer = self._peers[0]
-        self._refresh_contacts()
-        if self.current_peer is not None:
-            self._render_chat(self.current_peer)
-        else:
-            self._clear_view()
-        self.status_var.set(f"{mode} 运行中")
 
     @staticmethod
     def _port_owner_hint(port: str) -> str:
@@ -953,25 +1018,13 @@ class NetTesterGUI:
             pass
         return f"端口 {port} 已被占用，可执行  ss -ulpn | grep {port}  查看占用进程。"
 
-    def _close_worker(self):
-        self.loop_var.set(False)
-        self._toggle_loop()
-        w, self.worker = self.worker, None
-        if w:
-            w.stop()
-        self.open_btn.config(text="打开")
-        self.mode_box.config(state="readonly")
-        self._on_mode_change(reset=False)   # 恢复控件状态，保留会话记录
-        self.status_var.set("已关闭")
-        self._log_event("--- 连接已关闭 ---")
-
     # ---------------- 队列 <-> GUI ----------------
 
-    def _q_data(self, source, data):
-        self.msg_queue.put(("data", source, data))
+    def _q_data(self, cid, source, data):
+        self.msg_queue.put(("data", cid, source, data))
 
-    def _q_event(self, text):
-        self.msg_queue.put(("event", text, None))
+    def _q_event(self, cid, text):
+        self.msg_queue.put(("event", cid, text, None))
 
     def _refresh_ignore_cache(self):
         """刷新本机 IP 集合（勾选"忽略本机来源"时调用）。"""
@@ -982,36 +1035,36 @@ class NetTesterGUI:
         appends = []                   # 批量渲染，每 50ms 只刷一次，抗高包速
         try:
             while True:
-                kind, a, b = self.msg_queue.get_nowait()
+                kind, cid, a, b = self.msg_queue.get_nowait()
                 if kind == "data":
                     if self.rx_ignore_local_var.get() and \
                             a.rsplit(":", 1)[0] in self._local_ips:
                         continue     # 忽略本机发出的包（广播自发自收等场景）
                     self.rx_bytes += len(b)
                     self.rx_pkts += 1
-                    if self._ensure_convo(a):
+                    ckey = f"{cid}|{a}"
+                    if self._ensure_convo(ckey):
                         self._refresh_contacts()
-                    self._store_msg(a, "rx", b)
+                    self._store_msg(ckey, "rx", b)
                     if self.current_peer is None:
-                        self._select_convo(a)      # 第一个会话自动选中
-                    if a == self.current_peer:
+                        self._select_convo(ckey)   # 第一个会话自动选中
+                    if ckey == self.current_peer:
                         if not self.rx_pause_var.get():
-                            appends.append(("msg", "rx", a, b, time.time()))
+                            appends.append(("msg", "rx", ckey, b, time.time()))
                     else:
-                        self._unread[a] = self._unread.get(a, 0) + 1
+                        self._unread[ckey] = self._unread.get(ckey, 0) + 1
                         self._refresh_contacts()
                 else:
                     self.status_var.set(a)
-                    appends.append(("sys", f"* {a}"))
+                    appends.append(("sys", f"* [{self._cid_tag(cid)}] {a}"))
         except queue.Empty:
             pass
         if appends:
             self._append_msgs(appends)
-        if isinstance(self.worker, (TCPServerWorker, TCPClientWorker)):
-            vis = tuple(self._visible_peers())
-            if vis != self._last_visible:        # 连接接入/断开
-                self._last_visible = vis
-                self._refresh_contacts()
+        keys = tuple(self._all_convo_keys())       # 连接接入/断开/通道变化
+        if keys != self._last_visible:
+            self._last_visible = keys
+            self._refresh_contacts()
         self.root.after(50, self._poll_queue)
 
     # ---------------- 会话消息存储与气泡渲染 ----------------
@@ -1032,16 +1085,18 @@ class NetTesterGUI:
         return format_hex(data) if self.rx_hex_var.get() \
             else data.decode("utf-8", "replace")
 
-    def _insert_msg(self, direction: str, peer: str, data: bytes, t: float):
+    def _insert_msg(self, direction: str, ckey: str, data: bytes, t: float):
         """插一条气泡：meta 行（时间+对端）+ 正文。正文换行不带 tag，
         背景只包住文字，形成气泡效果。"""
         w = self.rx_text
         ts = self._fmt_ts(t)
+        peer = self._peer_of(ckey)
+        disp = "（群发）" if peer == "*" else peer
         if direction == "tx":
-            w.insert(tk.END, f"{ts}我 → {peer}\n", "tx_meta")
+            w.insert(tk.END, f"{ts}我 → {disp}\n", "tx_meta")
             w.insert(tk.END, self._fmt_body(data), "tx")
         else:
-            w.insert(tk.END, f"{ts}{peer}\n", "rx_meta")
+            w.insert(tk.END, f"{ts}{disp}\n", "rx_meta")
             w.insert(tk.END, self._fmt_body(data), "rx")
         w.insert(tk.END, "\n\n")
 
@@ -1101,8 +1156,14 @@ class NetTesterGUI:
         return text.encode("utf-8")
 
     def _send(self, random_pkt: bool) -> bool:
-        if not self.worker:
-            self.status_var.set("请先打开连接")
+        ckey = self.current_peer
+        if ckey is None:
+            self.status_var.set("请先添加或选择一个会话")
+            return False
+        cid, peer = ckey.rsplit("|", 1)
+        w = self.channels.get(cid)
+        if w is None:
+            self.status_var.set(f"该会话所在通道已关闭 [{self._cid_tag(cid)}]，请重新打开")
             return False
         try:
             payload = self._get_payload(random_pkt)
@@ -1110,63 +1171,47 @@ class NetTesterGUI:
                 self.status_var.set("发送内容为空")
                 return False
             n = 0
-            if isinstance(self.worker, TCPServerWorker):
-                # 目标 = 当前会话的客户端；选中"（所有连接）"则群发
-                target = None if self.current_peer == self._special_peer() \
-                    else self.current_peer
-                n = self.worker.send(payload, target)
-                conv = self.current_peer or self._special_peer()
-            elif isinstance(self.worker, UDPWorker):
-                if self.current_peer == self._special_peer():
-                    # 群发：向每个已知来源各发一份；单个目标失败不影响其他
-                    if not self._peers:
-                        self.status_var.set("暂无已知来源，请先收到包或点选会话")
+            if isinstance(w, UDPWorker):
+                if peer == "*":
+                    # 群发：向该通道下每个已知来源各发一份；单个失败不影响其他
+                    peers = [self._peer_of(k) for k in self._all_convo_keys()
+                             if self._chan_of(k) == cid and not k.endswith("|*")]
+                    if not peers:
+                        self.status_var.set("该通道暂无已知来源，请先收到包或添加目标")
                         return False
                     failed = []
-                    for p in self._peers:
+                    for p in peers:
                         h, pt = p.rsplit(":", 1)
                         try:
-                            self.worker.target = (h, int(pt))
-                            self.worker.send(payload)
+                            w.target = (h, int(pt))
+                            w.send(payload)
                         except OSError:
                             failed.append(p)
-                    n = len(self._peers) - len(failed)
+                    n = len(peers) - len(failed)
                     if n == 0:
                         self.status_var.set("群发失败：所有目标均不可达")
                         return False
                     if failed:
                         self._log_event(f"以下目标发送失败: {'、'.join(failed)}")
-                    conv = self._special_peer()
                 else:
-                    # 单发：目标 = 当前会话的对端地址
-                    peer = self.current_peer
-                    m = peer and re.match(r"^(\d+\.\d+\.\d+\.\d+):(\d+)$", peer)
-                    if not m:
-                        self.status_var.set("请先添加或选择一个目标会话")
-                        return False
-                    self.worker.target = (m.group(1), int(m.group(2)))
-                    self.worker.send(payload)
+                    h, pt = peer.rsplit(":", 1)
+                    w.target = (h, int(pt))
+                    w.send(payload)
                     n = 1
-                    conv = peer
-            else:   # TCP Client：目标 = 当前会话的服务器连接
-                peer = self.current_peer
-                if not peer:
-                    self.status_var.set("请先连接或选择一个服务器会话")
-                    return False
-                self.worker.send(payload, peer)
+            elif isinstance(w, TCPServerWorker):
+                # 目标 = 当前会话的客户端；选中群发项则广播
+                n = w.send(payload, None if peer == "*" else peer)
+            else:   # TCPClientWorker：目标 = 当前会话的服务器连接
+                w.send(payload, peer)
                 n = 1
-                conv = peer
         except (ValueError, OSError) as e:
             self.status_var.set(f"发送失败: {e}")
             return False
         self.tx_bytes += len(payload) * n
         self.tx_pkts += n
-        self._ensure_convo(conv)
-        self._store_msg(conv, "tx", payload)
-        if conv != self.current_peer:
-            self._select_convo(conv)
-        else:
-            self._append_msgs([("msg", "tx", conv, payload, time.time())])
+        self._ensure_convo(ckey)
+        self._store_msg(ckey, "tx", payload)
+        self._append_msgs([("msg", "tx", ckey, payload, time.time())])
         tag = "随机包" if random_pkt else "数据"
         self.status_var.set(f"已发送{tag} {len(payload)} 字节"
                             + (f" × {n}" if n > 1 else ""))
@@ -1222,8 +1267,8 @@ class NetTesterGUI:
         self.loop_var.set(False)
         if self._timer_job:
             self.root.after_cancel(self._timer_job)
-        if self.worker:
-            self.worker.stop()
+        for w in self.channels.values():
+            w.stop()
         self.root.destroy()
 
 
@@ -1256,7 +1301,7 @@ def main():
         # 无目标地址栏：CLI 目标在打开时自动建成会话（UDP）或发起连接（TCP Client）
         gui._pending_target = f"{args.remote_host}:{args.remote_port}"
     if args.open:
-        root.after(100, gui._open_worker)
+        root.after(100, gui._cli_open)
     root.mainloop()
 
 
