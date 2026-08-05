@@ -452,8 +452,6 @@ class NetTesterGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title("TCP/UDP 网络测试工具")
-        root.geometry("980x640")
-        root.minsize(860, 560)
 
         self.worker: BaseWorker | None = None
         self.msg_queue: queue.Queue = queue.Queue()
@@ -471,6 +469,11 @@ class NetTesterGUI:
         self._timer_job = None
 
         self._build_ui()
+        # 按内容实际所需尺寸开窗（不同平台/字体下都不会裁掉控件）
+        root.update_idletasks()
+        root.geometry(f"{max(940, root.winfo_reqwidth())}x"
+                      f"{max(600, root.winfo_reqheight())}")
+        root.minsize(820, 480)
         self._poll_queue()
         self._update_stats()
         root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -478,6 +481,11 @@ class NetTesterGUI:
     # ---------------- UI 搭建 ----------------
 
     def _build_ui(self):
+        # 状态栏先按底部占位（pack 顺序决定空间分配优先级）
+        self.status_var = tk.StringVar(value="就绪")
+        ttk.Label(self.root, textvariable=self.status_var, style="Status.TLabel",
+                  anchor=tk.W, padding=(8, 3)).pack(fill=tk.X, side=tk.BOTTOM)
+
         main = ttk.Frame(self.root, padding=6)
         main.pack(fill=tk.BOTH, expand=True)
 
@@ -541,12 +549,16 @@ class NetTesterGUI:
         right = ttk.Frame(main)
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
+        # 发送区先按底部占位（窗口高度不足时优先保住，不被接收区挤掉）
+        tx_frame = ttk.LabelFrame(right, text=" 发送 ", padding=4)
+        tx_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(6, 0))
+
         # 接收区
         rx_frame = ttk.LabelFrame(right, text=" 接收 ", padding=4)
         rx_frame.pack(fill=tk.BOTH, expand=True)
         self.rx_text = scrolledtext.ScrolledText(rx_frame, state=tk.DISABLED,
                                                  font=(MONO_FONT, 10), wrap=tk.NONE,
-                                                 **TEXT_STYLE)
+                                                 height=12, **TEXT_STYLE)
         self.rx_text.pack(fill=tk.BOTH, expand=True)
 
         rx_opt = ttk.Frame(rx_frame)
@@ -559,10 +571,7 @@ class NetTesterGUI:
         ttk.Checkbutton(rx_opt, text="暂停显示", variable=self.rx_pause_var).pack(side=tk.LEFT)
         ttk.Button(rx_opt, text="清空", command=self._clear_rx).pack(side=tk.RIGHT)
 
-        # 发送区
-        tx_frame = ttk.LabelFrame(right, text=" 发送 ", padding=4)
-        tx_frame.pack(fill=tk.X, pady=(6, 0))
-
+        # 发送区（框架已在上方按底部打包）
         rand_row = ttk.Frame(tx_frame)
         rand_row.pack(fill=tk.X, pady=2)
         ttk.Label(rand_row, text="随机包大小").pack(side=tk.LEFT)
@@ -598,11 +607,6 @@ class NetTesterGUI:
         self.send_btn = ttk.Button(tx_opt, text="发送", style="Accent.TButton",
                                    command=lambda: self._send(random_pkt=False))
         self.send_btn.pack(side=tk.RIGHT)
-
-        # 状态栏
-        self.status_var = tk.StringVar(value="就绪")
-        ttk.Label(self.root, textvariable=self.status_var, style="Status.TLabel",
-                  anchor=tk.W, padding=(8, 3)).pack(fill=tk.X, side=tk.BOTTOM)
 
         self._on_mode_change()
 
