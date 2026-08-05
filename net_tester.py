@@ -449,16 +449,22 @@ def apply_modern_theme(root):
     root.option_add("*TCombobox*Listbox.highlightThickness", 0)
     root.option_add("*TCombobox*Listbox.relief", "flat")
     root.option_add("*TCombobox*Listbox.activeStyle", "none")
-    # 复选框：Material 蓝底白勾，未选中为灰描边白底，悬停描边加深
+    # 复选框：Material 蓝底白勾（Tk 8.6 clam 只认 indicatorbackground /
+    # indicatorforeground / upper/lowerbordercolor，不认 indicatorcolor）
     s.configure("TCheckbutton", background=p["bg"], foreground=p["fg"],
-                bordercolor=p["border"], indicatorcolor="#FFFFFF",
-                indicatorforeground="#FFFFFF", indicatormargin=(0, 6, 0, 0))
+                indicatorbackground="#FFFFFF", indicatorforeground="#FFFFFF",
+                upperbordercolor=p["border"], lowerbordercolor=p["border"],
+                indicatormargin=(0, 6, 0, 0))
     s.map("TCheckbutton",
           background=[("active", p["bg"])],
-          bordercolor=[("active", p["subtle"]), ("selected", p["accent"])],
-          indicatorcolor=[("!selected", "#FFFFFF"),
-                          ("selected", p["accent"]),
-                          ("pressed", p["accent_press"])])
+          indicatorbackground=[("pressed", p["accent_press"]),
+                               ("selected", p["accent"]),
+                               ("active", "#E8F0FE"),
+                               ("!selected", "#FFFFFF")],
+          upperbordercolor=[("selected", p["accent"]), ("active", p["subtle"]),
+                            ("!selected", p["border"])],
+          lowerbordercolor=[("selected", p["accent"]), ("active", p["subtle"]),
+                            ("!selected", p["border"])])
     s.configure("TSeparator", background=p["border"])
     s.configure("Vertical.TScrollbar", background=p["border"], troughcolor=p["bg"],
                 bordercolor=p["bg"], arrowcolor=p["subtle"], arrowsize=12)
@@ -494,6 +500,7 @@ class NetTesterGUI:
         self.worker: BaseWorker | None = None
         self.msg_queue: queue.Queue = queue.Queue()
         self._peers = []                 # UDP 模式下见过的来源地址
+        self._local_ips = set()          # 本机 IP 缓存（"忽略本机来源"用）
 
         # 统计
         self.tx_bytes = 0
@@ -614,6 +621,10 @@ class NetTesterGUI:
         ttk.Checkbutton(rx_opt, text="时间戳", variable=self.rx_ts_var).pack(side=tk.LEFT, padx=6)
         self.rx_pause_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(rx_opt, text="暂停显示", variable=self.rx_pause_var).pack(side=tk.LEFT)
+        self.rx_ignore_local_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(rx_opt, text="忽略本机来源",
+                        variable=self.rx_ignore_local_var,
+                        command=self._refresh_ignore_cache).pack(side=tk.LEFT, padx=6)
         ttk.Button(rx_opt, text="清空", command=self._clear_rx).pack(side=tk.RIGHT)
 
         # 发送区（框架已在上方按底部打包）
@@ -745,6 +756,7 @@ class NetTesterGUI:
         self.worker = w
         self.open_btn.config(text="关闭")
         self.mode_box.config(state=tk.DISABLED)
+        self._refresh_ignore_cache()
         self.status_var.set(f"{mode} 运行中")
 
     @staticmethod
@@ -790,12 +802,20 @@ class NetTesterGUI:
     def _q_event(self, text):
         self.msg_queue.put(("event", text, None))
 
+    def _refresh_ignore_cache(self):
+        """刷新本机 IP 集合（勾选"忽略本机来源"时调用）。"""
+        if self.rx_ignore_local_var.get():
+            self._local_ips = set(detect_local_ips()) | {"127.0.0.1"}
+
     def _poll_queue(self):
         buf = []                       # 批量拼接，每 50ms 只插一次，抗高包速
         try:
             while True:
                 kind, a, b = self.msg_queue.get_nowait()
                 if kind == "data":
+                    if self.rx_ignore_local_var.get() and \
+                            a.rsplit(":", 1)[0] in self._local_ips:
+                        continue     # 忽略本机发出的包（广播自发自收等场景）
                     self.rx_bytes += len(b)
                     self.rx_pkts += 1
                     if isinstance(self.worker, UDPWorker):

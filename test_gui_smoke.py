@@ -4,9 +4,10 @@
 
 import os
 import tkinter as tk
-from net_tester import NetTesterGUI
+from net_tester import NetTesterGUI, apply_modern_theme
 
 root = tk.Tk()
+apply_modern_theme(root)          # 顺带验证主题样式代码不报错
 gui = NetTesterGUI(root)
 
 # 切到 UDP，本地与目标都指向 127.0.0.1:19099（自发自收）
@@ -38,7 +39,7 @@ def hex_send():
     gui._send(random_pkt=False)
 root.after(500, hex_send)
 
-def finish():
+def phase2():
     print(f"tx_pkts={gui.tx_pkts} rx_pkts={gui.rx_pkts} "
           f"tx_bytes={gui.tx_bytes} rx_bytes={gui.rx_bytes}")
     assert gui.tx_pkts == 3, "应发送 3 包"
@@ -50,10 +51,21 @@ def finish():
     gui._on_client_pick()
     assert gui.remote_host.get() == "127.0.0.1" and gui.remote_port.get() == "19099", \
         "点选来源未填入目标地址"
+    # 勾选"忽略本机来源"后，自发自收应被过滤掉
+    gui.rx_ignore_local_var.set(True)
+    gui._refresh_ignore_cache()
+    assert "127.0.0.1" in gui._local_ips, "本机 IP 缓存未包含 127.0.0.1"
+    gui._reset_stats()
+    root.after(200, lambda: gui._send(random_pkt=True))
+    root.after(800, finish)
+
+def finish():
+    assert gui.tx_pkts == 1, f"忽略本机阶段应只发 1 包，实际 {gui.tx_pkts}"
+    assert gui.rx_pkts == 0, f"勾选忽略本机来源后不应收到自己的包，实际 {gui.rx_pkts}"
     gui._close_worker()
     root.destroy()
-    print("GUI 冒烟测试通过（含来源列表联动）")
+    print("GUI 冒烟测试通过（含来源列表联动、忽略本机来源过滤）")
 
-root.after(1500, finish)
+root.after(1500, phase2)
 root.after(10000, lambda: (print("TIMEOUT"), os._exit(2)))
 root.mainloop()
