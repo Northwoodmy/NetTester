@@ -39,8 +39,7 @@ gui = NetTesterGUI(root)
 
 gui.mode_var.set("UDP")
 gui._on_mode_change()
-for entry, val in ((gui.local_host, "127.0.0.1"), (gui.local_port, str(PORT)),
-                   (gui.remote_host, "127.0.0.1"), (gui.remote_port, "9")):
+for entry, val in ((gui.local_host, "127.0.0.1"), (gui.local_port, str(PORT))):
     entry.delete(0, tk.END)
     entry.insert(0, val)
 

@@ -195,44 +195,76 @@ class UDPWorker(BaseWorker):
 
 
 class TCPClientWorker(BaseWorker):
-    """主动连接 TCP 服务端。"""
+    """主动连接多个 TCP 服务端；每个连接 = 一个会话，send 时指定目标。"""
 
-    def __init__(self, on_data, on_event, remote_host: str, remote_port: int):
+    def __init__(self, on_data, on_event):
         super().__init__(on_data, on_event)
-        self.remote = (remote_host, remote_port)
-        self.sock = None
+        self.conns = {}                 # addr_str -> socket
+        self._lock = threading.Lock()
 
     def start(self):
-        self.sock = socket.create_connection(self.remote, timeout=5)
-        self.sock.settimeout(0.5)
-        threading.Thread(target=self._recv_loop, daemon=True).start()
-        self.on_event(f"已连接到 {self.remote[0]}:{self.remote[1]}")
+        # 无需绑定/监听；连接通过 connect() 按需发起
+        self.on_event("TCP Client 已就绪，添加目标即连接服务器")
 
-    def _recv_loop(self):
-        src = f"{self.remote[0]}:{self.remote[1]}"
+    def connect(self, host: str, port: int) -> str:
+        key = f"{host}:{port}"
+        with self._lock:
+            old = self.conns.pop(key, None)     # 重连同目标：先关旧连接
+        if old:
+            try:
+                old.close()
+            except OSError:
+                pass
+        sock = socket.create_connection((host, port), timeout=5)
+        sock.settimeout(0.5)
+        with self._lock:
+            self.conns[key] = sock
+        self.on_event(f"已连接到 {key}")
+        threading.Thread(target=self._conn_loop, args=(key, sock),
+                         daemon=True).start()
+        return key
+
+    def _conn_loop(self, key: str, sock: socket.socket):
         while not self._stop.is_set():
             try:
-                data = self.sock.recv(RECV_BUF)
+                data = sock.recv(RECV_BUF)
             except socket.timeout:
                 continue
             except OSError:
                 break
             if not data:
-                self.on_event("对方已断开连接")
                 break
-            self.on_data(src, data)
+            self.on_data(key, data)
+        with self._lock:
+            self.conns.pop(key, None)
+        try:
+            sock.close()
+        except OSError:
+            pass
+        self.on_event(f"连接已断开 {key}")
 
-    def send(self, data: bytes):
-        self.sock.sendall(data)
+    def conn_keys(self):
+        with self._lock:
+            return list(self.conns.keys())
+
+    def send(self, data: bytes, target: str):
+        with self._lock:
+            sock = self.conns.get(target)
+        if not sock:
+            raise OSError(f"连接 {target} 不存在或已断开，可重新添加该会话")
+        sock.sendall(data)
 
     def stop(self):
         super().stop()
-        if self.sock:
+        with self._lock:
+            conns = list(self.conns.values())
+            self.conns.clear()
+        for s in conns:
             try:
-                self.sock.shutdown(socket.SHUT_RDWR)
+                s.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
-            self.sock.close()
+            s.close()
 
 
 class TCPServerWorker(BaseWorker):
@@ -512,7 +544,6 @@ class NetTesterGUI:
         self._convo_keys = []            # 联系人列表行对应的 peer key
         self._unread = {}                # peer -> 未读条数
         self.current_peer = None         # 当前选中的会话（特殊会话见 _special_peer）
-        self._server_peer = None         # TCP Client 的对端（服务器地址）
         self._pending_target = None      # CLI --remote-* 指定的、待建成会话的目标
         self._last_visible = None        # TCP Server 联系人列表变化检测缓存
 
@@ -572,33 +603,24 @@ class NetTesterGUI:
         self.local_port.insert(0, "9000")
         self.local_port.grid(row=3, column=1, sticky=tk.W, padx=(4, 0))
 
-        self.remote_lbl = ttk.Label(left, text="目标地址")
-        self.remote_lbl.grid(row=4, column=0, sticky=tk.W, pady=2)
-        self.remote_host = ttk.Entry(left, width=12)
-        self.remote_host.insert(0, "127.0.0.1")
-        self.remote_host.grid(row=5, column=0, sticky=tk.EW, pady=2)
-        self.remote_port = ttk.Entry(left, width=7)
-        self.remote_port.insert(0, "9000")
-        self.remote_port.grid(row=5, column=1, sticky=tk.W, padx=(4, 0))
-
         self.open_btn = ttk.Button(left, text="打开", style="Accent.TButton",
                                    command=self._toggle_open)
-        self.open_btn.grid(row=6, column=0, columnspan=2, sticky=tk.EW, pady=(8, 2))
+        self.open_btn.grid(row=4, column=0, columnspan=2, sticky=tk.EW, pady=(8, 2))
 
-        ttk.Separator(left).grid(row=7, column=0, columnspan=2, sticky=tk.EW, pady=8)
+        ttk.Separator(left).grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=8)
 
         self.stats_tx_lbl = tk.Label(left, text="发送: 0 B / 0 包",
                                      fg=PALETTE["accent"], bg=PALETTE["bg"],
                                      anchor=tk.W, justify=tk.LEFT)
-        self.stats_tx_lbl.grid(row=8, column=0, columnspan=2, sticky=tk.W, pady=2)
+        self.stats_tx_lbl.grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=2)
         self.stats_rx_lbl = tk.Label(left, text="接收: 0 B / 0 包",
                                      fg=PALETTE["green"], bg=PALETTE["bg"],
                                      anchor=tk.W, justify=tk.LEFT)
-        self.stats_rx_lbl.grid(row=9, column=0, columnspan=2, sticky=tk.W, pady=2)
+        self.stats_rx_lbl.grid(row=7, column=0, columnspan=2, sticky=tk.W, pady=2)
         self.rate_lbl = ttk.Label(left, text="速率 ↑ 0 B/s  ↓ 0 B/s")
-        self.rate_lbl.grid(row=10, column=0, columnspan=2, sticky=tk.W, pady=2)
+        self.rate_lbl.grid(row=8, column=0, columnspan=2, sticky=tk.W, pady=2)
         ttk.Button(left, text="统计清零", command=self._reset_stats).grid(
-            row=11, column=0, columnspan=2, sticky=tk.EW, pady=(4, 0))
+            row=9, column=0, columnspan=2, sticky=tk.EW, pady=(4, 0))
 
         left.columnconfigure(0, weight=1)
 
@@ -731,29 +753,23 @@ class NetTesterGUI:
 
     def _on_mode_change(self, reset=True):
         mode = self.mode_var.get()
-        is_server = mode == "TCP Server"
         is_client = mode == "TCP Client"
-        # 本地地址仅 TCP Client 不需要；目标地址仅 TCP Client 需要
-        # （UDP 的发送目标由会话联系人决定，Server 不需要目标）
+        # 本地地址仅 TCP Client 用不到（对端由会话连接决定）
         for w in (self.local_host, self.local_port):
             w.config(state=tk.DISABLED if is_client else tk.NORMAL)
-        for w in (self.remote_host, self.remote_port):
-            w.config(state=tk.NORMAL)
-        for w in (self.remote_lbl, self.remote_host, self.remote_port):
-            w.grid() if is_client else w.grid_remove()
-        self.open_btn.config(text={"TCP Server": "开始监听", "TCP Client": "连接",
+        self.open_btn.config(text={"TCP Server": "开始监听", "TCP Client": "打开",
                                    "UDP": "打开"}[mode])
-        # 「发起新会话」行只在 UDP 模式有意义（TCP 对端由连接决定）
-        if mode == "UDP":
-            self.add_row.pack(fill=tk.X, pady=(4, 0))
-        else:
+        # 「发起新会话」：UDP=添加目标，TCP Client=连接新服务器；Server 的对端
+        # 由客户端连入决定，不能主动添加
+        if mode == "TCP Server":
             self.add_row.pack_forget()
+        else:
+            self.add_row.pack(fill=tk.X, pady=(4, 0))
         if reset:
             # 切换模式清空会话（不同模式的对端不混用）
             self._convos.clear()
             self._peers.clear()
             self._unread.clear()
-            self._server_peer = None
             self.current_peer = None
             self._clear_view()
         self._refresh_contacts()
@@ -770,11 +786,14 @@ class NetTesterGUI:
         mode = self.mode_var.get()
         if mode == "UDP":
             return list(self._peers)
+        # TCP：活跃连接 ∪ 有聊天记录的对端（断线会话保留记录，类微信）
+        worker = self.worker
         if mode == "TCP Server":
-            keys = self.worker.client_keys() if self.worker else []
-            hist = [k for k in self._convos if k != self._special_peer()]
-            return sorted(set(keys) | set(hist))
-        return [self._server_peer] if self._server_peer else []
+            keys = worker.client_keys() if isinstance(worker, TCPServerWorker) else []
+        else:
+            keys = worker.conn_keys() if isinstance(worker, TCPClientWorker) else []
+        hist = [k for k in self._convos if k != self._special_peer()]
+        return sorted(set(keys) | set(hist))
 
     def _refresh_contacts(self):
         """重建联系人列表：特殊项（群发）在前，保持当前选中态。"""
@@ -803,9 +822,10 @@ class NetTesterGUI:
         return is_new
 
     def _add_target(self):
-        """主动发起会话：把输入的 IP:端口（可逗号分隔多个）加为联系人。"""
-        if self.mode_var.get() != "UDP":
-            self.status_var.set("仅 UDP 模式支持主动添加目标")
+        """主动发起会话：UDP=添加目标；TCP Client=连接新服务器。可逗号分隔多个。"""
+        mode = self.mode_var.get()
+        if mode == "TCP Server":
+            self.status_var.set("TCP Server 的对端由客户端连入决定，无法主动添加")
             return
         text = self.new_peer.get().strip()
         if not text:
@@ -819,6 +839,15 @@ class NetTesterGUI:
                 self.status_var.set(f"地址格式不正确: {part}（应为 IP:端口）")
                 return
             peer = f"{m.group(1)}:{int(m.group(2))}"
+            if mode == "TCP Client":
+                if not self.worker:
+                    self.status_var.set("请先打开")
+                    return
+                try:
+                    self.worker.connect(m.group(1), int(m.group(2)))
+                except OSError as e:
+                    self.status_var.set(f"连接 {peer} 失败: {e}")
+                    continue
             self._ensure_convo(peer)
             added.append(peer)
         if not added:
@@ -849,15 +878,13 @@ class NetTesterGUI:
         mode = self.mode_var.get()
         try:
             if mode == "UDP":
+                # 构造时的初始目标仅是占位，实际发送目标由当前会话决定
                 w = UDPWorker(self._q_data, self._q_event,
                               self.local_host.get().strip(),
                               int(self.local_port.get()),
-                              self.remote_host.get().strip(),
-                              int(self.remote_port.get()))
+                              "127.0.0.1", 9)
             elif mode == "TCP Client":
-                w = TCPClientWorker(self._q_data, self._q_event,
-                                    self.remote_host.get().strip(),
-                                    int(self.remote_port.get()))
+                w = TCPClientWorker(self._q_data, self._q_event)
             else:
                 w = TCPServerWorker(self._q_data, self._q_event,
                                     self.local_host.get().strip(),
@@ -876,10 +903,17 @@ class NetTesterGUI:
         self._refresh_ignore_cache()
         # 恢复当前会话（历史会话保留，类微信：关闭/重开不丢聊天记录）
         if mode == "TCP Client":
-            self._server_peer = f"{self.remote_host.get().strip()}:" \
-                                f"{int(self.remote_port.get())}"
-            self._ensure_convo(self._server_peer)
-            self.current_peer = self._server_peer
+            if self._pending_target:      # CLI --remote-* 指定的服务器
+                host, port = self._pending_target.rsplit(":", 1)
+                try:
+                    w.connect(host, int(port))
+                    self._ensure_convo(self._pending_target)
+                    self.current_peer = self._pending_target
+                except OSError as e:
+                    self._log_event(f"连接 {self._pending_target} 失败: {e}")
+                self._pending_target = None
+            elif self.current_peer is None and self._visible_peers():
+                self.current_peer = self._visible_peers()[0]
         elif mode == "TCP Server":
             self.current_peer = self._special_peer()
             self._ensure_convo(self.current_peer)
@@ -973,9 +1007,9 @@ class NetTesterGUI:
             pass
         if appends:
             self._append_msgs(appends)
-        if isinstance(self.worker, TCPServerWorker):
+        if isinstance(self.worker, (TCPServerWorker, TCPClientWorker)):
             vis = tuple(self._visible_peers())
-            if vis != self._last_visible:        # 客户端接入/断开
+            if vis != self._last_visible:        # 连接接入/断开
                 self._last_visible = vis
                 self._refresh_contacts()
         self.root.after(50, self._poll_queue)
@@ -1114,10 +1148,14 @@ class NetTesterGUI:
                     self.worker.send(payload)
                     n = 1
                     conv = peer
-            else:   # TCP Client：唯一对端是服务器
-                self.worker.send(payload)
+            else:   # TCP Client：目标 = 当前会话的服务器连接
+                peer = self.current_peer
+                if not peer:
+                    self.status_var.set("请先连接或选择一个服务器会话")
+                    return False
+                self.worker.send(payload, peer)
                 n = 1
-                conv = self._server_peer
+                conv = peer
         except (ValueError, OSError) as e:
             self.status_var.set(f"发送失败: {e}")
             return False
@@ -1214,12 +1252,8 @@ def main():
         set_entry(gui.local_host, args.local_host)
     if args.local_port:
         set_entry(gui.local_port, args.local_port)
-    if args.remote_host:
-        set_entry(gui.remote_host, args.remote_host)
-    if args.remote_port:
-        set_entry(gui.remote_port, args.remote_port)
-    if args.remote_host and args.remote_port and args.mode == "UDP":
-        # UDP 无目标地址栏，CLI 目标在打开时自动建成会话
+    if args.remote_host and args.remote_port and args.mode in ("UDP", "TCP Client"):
+        # 无目标地址栏：CLI 目标在打开时自动建成会话（UDP）或发起连接（TCP Client）
         gui._pending_target = f"{args.remote_host}:{args.remote_port}"
     if args.open:
         root.after(100, gui._open_worker)

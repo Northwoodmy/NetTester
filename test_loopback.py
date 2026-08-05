@@ -112,13 +112,14 @@ def test_tcp():
     srv.start()
     port = srv.server.getsockname()[1]
 
-    cli = TCPClientWorker(cli_c.on_data, cli_c.on_event, "127.0.0.1", port)
+    cli = TCPClientWorker(cli_c.on_data, cli_c.on_event)
     cli.start()
+    key = cli.connect("127.0.0.1", port)
 
     check("TCP server 看到客户端接入",
           wait_for(lambda: len(srv.client_keys()) == 1))
 
-    cli.send(b"hello server")
+    cli.send(b"hello server", key)
     check("TCP client -> server", wait_for(
         lambda: any(p == b"hello server" for _, p in srv_c.data)))
 
@@ -131,7 +132,7 @@ def test_tcp():
         lambda: any(p == b"broadcast" for _, p in cli_c.data)))
 
     big = b"z" * (1024 * 1024)                # 1MB，验证流式收全
-    cli.send(big)
+    cli.send(big, key)
     check("TCP 1MB 完整到达", wait_for(
         lambda: sum(len(p) for _, p in srv_c.data if set(p) == {122}) >= 1024 * 1024
         or b"".join(p for _, p in srv_c.data).count(b"z" * 100) > 0, timeout=5))
