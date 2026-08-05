@@ -616,15 +616,17 @@ class NetTesterGUI:
 
         chat_box = ttk.Frame(rx_frame)
         chat_box.pack(fill=tk.BOTH, expand=True)
+        left_col = ttk.Frame(chat_box)
+        left_col.pack(side=tk.LEFT, fill=tk.Y)
         self.contact_list = tk.Listbox(
-            chat_box, width=20, bg="#FFFFFF", fg=PALETTE["fg"],
+            left_col, width=20, bg="#FFFFFF", fg=PALETTE["fg"],
             selectbackground=PALETTE["select"],
             selectforeground=PALETTE["accent_press"],
             relief="flat", highlightthickness=1,
             highlightbackground=PALETTE["border"],
             highlightcolor=PALETTE["accent"],
             activestyle="none", exportselection=False)
-        self.contact_list.pack(side=tk.LEFT, fill=tk.Y)
+        self.contact_list.pack(fill=tk.BOTH, expand=True)
         self.contact_list.bind("<<ListboxSelect>>", self._on_contact_pick)
         ttk.Separator(chat_box, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y)
 
@@ -645,6 +647,18 @@ class NetTesterGUI:
                         rmargin=6, justify=tk.RIGHT, spacing1=8)
         t.tag_configure("sys", foreground="#9AA0A6", font=(ui_font, 8),
                         justify=tk.CENTER, spacing1=6)
+
+        # 发起新会话行（仅 UDP 模式显示，主动添加目标，可逗号分隔多个）
+        self.add_row = ttk.Frame(left_col)
+        ttk.Label(self.add_row, text="发起新会话 IP:端口（逗号可分隔多个）",
+                  font=(ui_font, 8), foreground=PALETTE["subtle"]).pack(anchor=tk.W)
+        add_line = ttk.Frame(self.add_row)
+        add_line.pack(fill=tk.X, pady=(2, 0))
+        self.new_peer = ttk.Entry(add_line)
+        self.new_peer.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        self.new_peer.bind("<Return>", lambda _e: self._add_target())
+        ttk.Button(add_line, text="添加", width=4,
+                   command=self._add_target).pack(side=tk.RIGHT)
 
         rx_opt = ttk.Frame(rx_frame)
         rx_opt.pack(fill=tk.X, pady=(4, 0))
@@ -710,7 +724,7 @@ class NetTesterGUI:
         if cur and cur not in ips:         # 保留手动输入的地址
             self.local_host.config(values=ips + [cur])
 
-    def _on_mode_change(self):
+    def _on_mode_change(self, reset=True):
         mode = self.mode_var.get()
         is_server = mode == "TCP Server"
         is_client = mode == "TCP Client"
@@ -721,13 +735,19 @@ class NetTesterGUI:
             w.config(state=tk.DISABLED if is_server else tk.NORMAL)
         self.open_btn.config(text={"TCP Server": "开始监听", "TCP Client": "连接",
                                    "UDP": "打开"}[mode])
-        # 切换模式清空会话（不同模式的对端不混用）
-        self._convos.clear()
-        self._peers.clear()
-        self._unread.clear()
-        self._server_peer = None
-        self.current_peer = None
-        self._clear_view()
+        # 「发起新会话」行只在 UDP 模式有意义（TCP 对端由连接决定）
+        if mode == "UDP":
+            self.add_row.pack(fill=tk.X, pady=(4, 0))
+        else:
+            self.add_row.pack_forget()
+        if reset:
+            # 切换模式清空会话（不同模式的对端不混用）
+            self._convos.clear()
+            self._peers.clear()
+            self._unread.clear()
+            self._server_peer = None
+            self.current_peer = None
+            self._clear_view()
         self._refresh_contacts()
 
     # ---------------- 会话（联系人）管理 ----------------
@@ -773,6 +793,31 @@ class NetTesterGUI:
                 self._peers = self._peers[-50:]
             is_new = True
         return is_new
+
+    def _add_target(self):
+        """主动发起会话：把输入的 IP:端口（可逗号分隔多个）加为联系人。"""
+        if self.mode_var.get() != "UDP":
+            self.status_var.set("仅 UDP 模式支持主动添加目标")
+            return
+        text = self.new_peer.get().strip()
+        if not text:
+            return
+        added = []
+        for part in re.split(r"[,，;；\s]+", text):
+            if not part:
+                continue
+            m = re.match(r"^(\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})$", part)
+            if not m or not (0 < int(m.group(2)) < 65536):
+                self.status_var.set(f"地址格式不正确: {part}（应为 IP:端口）")
+                return
+            peer = f"{m.group(1)}:{int(m.group(2))}"
+            self._ensure_convo(peer)
+            added.append(peer)
+        if not added:
+            return
+        self.new_peer.delete(0, tk.END)
+        self._select_convo(added[-1])      # 选中最后添加的目标
+        self.status_var.set(f"已添加 {len(added)} 个目标: {'、'.join(added)}")
 
     def _on_contact_pick(self, _event=None):
         sel = self.contact_list.curselection()
@@ -830,12 +875,7 @@ class NetTesterGUI:
         self.open_btn.config(text="关闭")
         self.mode_box.config(state=tk.DISABLED)
         self._refresh_ignore_cache()
-        # 按模式初始化会话
-        self._convos.clear()
-        self._peers.clear()
-        self._unread.clear()
-        self._server_peer = None
-        self.current_peer = None
+        # 恢复当前会话（历史会话保留，类微信：关闭/重开不丢聊天记录）
         if mode == "TCP Client":
             self._server_peer = f"{self.remote_host.get().strip()}:" \
                                 f"{int(self.remote_port.get())}"
@@ -844,8 +884,13 @@ class NetTesterGUI:
         elif mode == "TCP Server":
             self.current_peer = self._special_peer()
             self._ensure_convo(self.current_peer)
-        self._clear_view()
+        elif self.current_peer is None and self._peers:
+            self.current_peer = self._peers[0]
         self._refresh_contacts()
+        if self.current_peer is not None:
+            self._render_chat(self.current_peer)
+        else:
+            self._clear_view()
         self.status_var.set(f"{mode} 运行中")
 
     @staticmethod
@@ -878,14 +923,7 @@ class NetTesterGUI:
             w.stop()
         self.open_btn.config(text="打开")
         self.mode_box.config(state="readonly")
-        self._peers.clear()
-        self._convos.clear()
-        self._unread.clear()
-        self._server_peer = None
-        self.current_peer = None
-        self._clear_view()
-        self._refresh_contacts()
-        self._on_mode_change()
+        self._on_mode_change(reset=False)   # 恢复控件状态，保留会话记录
         self.status_var.set("已关闭")
         self._log_event("--- 连接已关闭 ---")
 
@@ -1042,15 +1080,24 @@ class NetTesterGUI:
                 conv = self.current_peer or self._special_peer()
             elif isinstance(self.worker, UDPWorker):
                 if self.current_peer == self._special_peer():
-                    # 群发：向每个已知来源各发一份
+                    # 群发：向每个已知来源各发一份；单个目标失败不影响其他
                     if not self._peers:
                         self.status_var.set("暂无已知来源，请先收到包或点选会话")
                         return False
+                    failed = []
                     for p in self._peers:
                         h, pt = p.rsplit(":", 1)
-                        self.worker.target = (h, int(pt))
-                        self.worker.send(payload)
-                    n = len(self._peers)
+                        try:
+                            self.worker.target = (h, int(pt))
+                            self.worker.send(payload)
+                        except OSError:
+                            failed.append(p)
+                    n = len(self._peers) - len(failed)
+                    if n == 0:
+                        self.status_var.set("群发失败：所有目标均不可达")
+                        return False
+                    if failed:
+                        self._log_event(f"以下目标发送失败: {'、'.join(failed)}")
                     conv = self._special_peer()
                 else:
                     # 单发：以目标地址栏为准（手改后自动切到对应会话）

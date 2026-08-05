@@ -58,7 +58,16 @@ def phase2():
     # 会话里应同时有 rx 和 tx 气泡记录
     dirs = [m[0] for m in gui._convos[peer]]
     assert dirs.count("rx") >= 3 and "tx" in dirs, f"会话消息记录不完整: {dirs}"
-    # 群发：选中"（所有已知来源）"发随机包 -> 向唯一已知来源（自己）发 1 份
+    # 主动添加多个目标 -> 进入联系人列表并选中最后一个
+    # （用 127.0.0.x：整个 127/8 都走本机回环，发送必然成功但无人应答）
+    gui.new_peer.delete(0, tk.END)
+    gui.new_peer.insert(0, "127.0.0.2:6000, 127.0.0.3:6000")
+    gui._add_target()
+    assert "127.0.0.2:6000" in gui._convo_keys and "127.0.0.3:6000" in gui._convo_keys, \
+        f"主动添加目标失败: {gui._convo_keys}"
+    assert gui.current_peer == "127.0.0.3:6000", "添加后应选中最后添加的目标"
+    assert gui.remote_host.get() == "127.0.0.3" and gui.remote_port.get() == "6000"
+    # 群发：选中"（所有已知来源）"发随机包 -> 向 3 个已知来源各发一份
     gui._select_convo("（所有已知来源）")
     assert gui.current_peer == "（所有已知来源）"
     gui._reset_stats()
@@ -66,8 +75,8 @@ def phase2():
     root.after(700, phase3)
 
 def phase3():
-    assert gui.tx_pkts == 1, f"群发应发 1 包，实际 {gui.tx_pkts}"
-    assert gui.rx_pkts == 1, f"群发给自己应收 1 包，实际 {gui.rx_pkts}"
+    assert gui.tx_pkts == 3, f"群发应向 3 个目标各发 1 包，实际 {gui.tx_pkts}"
+    assert gui.rx_pkts == 1, f"群发只有本机回 1 包，实际 {gui.rx_pkts}"
     # 勾选"忽略本机来源"后，自发自收应被过滤掉
     gui._select_convo("127.0.0.1:19099")
     gui.rx_ignore_local_var.set(True)
@@ -81,8 +90,14 @@ def finish():
     assert gui.tx_pkts == 1, f"忽略本机阶段应只发 1 包，实际 {gui.tx_pkts}"
     assert gui.rx_pkts == 0, f"勾选忽略本机来源后不应收到自己的包，实际 {gui.rx_pkts}"
     gui._close_worker()
+    # 会话跨关闭/重开保留（主动添加的目标不丢）
+    assert "127.0.0.2:6000" in gui._convo_keys, "关闭后主动添加的目标应保留"
+    gui._toggle_open()
+    assert gui.worker is not None, "重新打开失败"
+    assert "127.0.0.3:6000" in gui._convo_keys, "重开后主动添加的目标应保留"
+    gui._close_worker()
     root.destroy()
-    print("GUI 冒烟测试通过（会话/群发/忽略本机来源）")
+    print("GUI 冒烟测试通过（会话/主动添加目标/群发/忽略本机来源）")
 
 root.after(1500, phase2)
 root.after(10000, lambda: (print("TIMEOUT"), os._exit(2)))
