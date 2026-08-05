@@ -349,6 +349,7 @@ class NetTesterGUI:
 
         self.worker: BaseWorker | None = None
         self.msg_queue: queue.Queue = queue.Queue()
+        self._peers = []                 # UDP 模式下见过的来源地址
 
         # 统计
         self.tx_bytes = 0
@@ -407,11 +408,13 @@ class NetTesterGUI:
         self.open_btn = ttk.Button(left, text="打开", command=self._toggle_open)
         self.open_btn.grid(row=6, column=0, columnspan=2, sticky=tk.EW, pady=(8, 2))
 
-        ttk.Label(left, text="连接列表").grid(row=7, column=0, sticky=tk.W, pady=2)
+        self.client_lbl = ttk.Label(left, text="连接列表")
+        self.client_lbl.grid(row=7, column=0, sticky=tk.W, pady=2)
         self.client_var = tk.StringVar(value="所有连接")
         self.client_box = ttk.Combobox(left, textvariable=self.client_var,
                                        state="readonly", values=["所有连接"], width=16)
         self.client_box.grid(row=8, column=0, columnspan=2, sticky=tk.EW, pady=2)
+        self.client_box.bind("<<ComboboxSelected>>", self._on_client_pick)
 
         ttk.Separator(left).grid(row=9, column=0, columnspan=2, sticky=tk.EW, pady=8)
 
@@ -511,9 +514,43 @@ class NetTesterGUI:
             w.config(state=tk.DISABLED if is_client else tk.NORMAL)
         for w in (self.remote_host, self.remote_port):
             w.config(state=tk.DISABLED if is_server else tk.NORMAL)
-        self.client_box.config(state="readonly" if is_server else tk.DISABLED)
         self.open_btn.config(text={"TCP Server": "开始监听", "TCP Client": "连接",
                                    "UDP": "打开"}[mode])
+        if is_server:
+            self.client_lbl.config(text="连接列表")
+            self.client_box.config(state="readonly", values=["所有连接"])
+            self.client_var.set("所有连接")
+        elif mode == "UDP":
+            # UDP 无连接，此框复用为"见过的来源地址"，点选即填入目标地址
+            self.client_lbl.config(text="来源列表")
+            self.client_box.config(state="readonly",
+                                   values=["（手动目标）"] + self._peers)
+            self.client_var.set("（手动目标）")
+        else:
+            self.client_lbl.config(text="连接列表")
+            self.client_box.config(state=tk.DISABLED, values=[])
+            self.client_var.set("")
+
+    def _on_client_pick(self, _event=None):
+        """UDP 模式：点选来源地址 -> 填入目标地址栏。"""
+        if self.mode_var.get() != "UDP":
+            return
+        m = re.match(r"^(\d+\.\d+\.\d+\.\d+):(\d+)$", self.client_var.get())
+        if m:
+            for entry, val in ((self.remote_host, m.group(1)),
+                               (self.remote_port, m.group(2))):
+                entry.delete(0, tk.END)
+                entry.insert(0, val)
+            self.status_var.set(f"目标已设为 {m.group(0)}")
+
+    def _add_peer(self, addr: str):
+        if addr in self._peers:
+            return
+        self._peers.append(addr)
+        if len(self._peers) > 50:
+            self._peers = self._peers[-50:]
+        if self.mode_var.get() == "UDP":
+            self.client_box.config(values=["（手动目标）"] + self._peers)
 
     def _toggle_open(self):
         if self.worker:
@@ -581,8 +618,8 @@ class NetTesterGUI:
             w.stop()
         self.open_btn.config(text="打开")
         self.mode_box.config(state="readonly")
+        self._peers.clear()
         self._on_mode_change()
-        self._refresh_client_list([])
         self.status_var.set("已关闭")
         self._log_event("--- 连接已关闭 ---")
 
@@ -602,6 +639,8 @@ class NetTesterGUI:
                 if kind == "data":
                     self.rx_bytes += len(b)
                     self.rx_pkts += 1
+                    if isinstance(self.worker, UDPWorker):
+                        self._add_peer(a)
                     if not self.rx_pause_var.get():
                         buf.append(self._fmt_rx(a, b))
                 else:
@@ -676,6 +715,10 @@ class NetTesterGUI:
             if isinstance(self.worker, TCPServerWorker):
                 self.worker.send(payload, self.client_var.get())
             else:
+                if isinstance(self.worker, UDPWorker):
+                    # 发送前同步目标地址（点选来源列表/手改后无需重开）
+                    self.worker.target = (self.remote_host.get().strip(),
+                                          int(self.remote_port.get()))
                 self.worker.send(payload)
         except (ValueError, OSError) as e:
             self.status_var.set(f"发送失败: {e}")

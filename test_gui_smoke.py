@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """GUI 冒烟测试：真实打开窗口，模拟切换 UDP 模式并自发自收。"""
 
+import os
 import tkinter as tk
 from net_tester import NetTesterGUI
 
@@ -42,9 +43,17 @@ def finish():
           f"tx_bytes={gui.tx_bytes} rx_bytes={gui.rx_bytes}")
     assert gui.tx_pkts == 3, "应发送 3 包"
     assert gui.rx_pkts >= 3, f"应至少收到 3 包，实际 {gui.rx_pkts}"
+    # 来源列表应出现自己（自发自收），点选后填入目标地址栏
+    vals = str(gui.client_box.cget("values"))
+    assert "127.0.0.1:19099" in vals, f"来源列表未更新: {vals}"
+    gui.client_var.set("127.0.0.1:19099")
+    gui._on_client_pick()
+    assert gui.remote_host.get() == "127.0.0.1" and gui.remote_port.get() == "19099", \
+        "点选来源未填入目标地址"
     gui._close_worker()
     root.destroy()
-    print("GUI 冒烟测试通过")
+    print("GUI 冒烟测试通过（含来源列表联动）")
 
 root.after(1500, finish)
+root.after(10000, lambda: (print("TIMEOUT"), os._exit(2)))
 root.mainloop()
