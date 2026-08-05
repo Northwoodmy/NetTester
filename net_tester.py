@@ -337,34 +337,38 @@ class TCPServerWorker(BaseWorker):
 
 
 # ---------------------------------------------------------------------------
-# 现代化深色主题 + 毛玻璃
+# Google Material 浅色主题
 # ---------------------------------------------------------------------------
 
 PALETTE = {
-    "bg":           "#1e1e2e",   # 主背景
-    "surface":      "#2a2b3d",   # 按钮/控件
-    "field":        "#14141f",   # 输入框/文本区
-    "fg":           "#cdd6f4",   # 主文字
-    "subtle":       "#9399b2",   # 次要文字
-    "accent":       "#89b4fa",   # 强调色
-    "accent_hi":    "#b4befe",
-    "accent_press": "#74c7ec",
-    "disabled_bg":  "#1a1b26",
-    "disabled_fg":  "#6c7086",
+    "bg":           "#F8F9FA",   # 主背景（Google 浅灰）
+    "surface":      "#F1F3F4",   # 按钮/控件
+    "field":        "#FFFFFF",   # 输入框/文本区
+    "fg":           "#202124",   # 主文字
+    "subtle":       "#5F6368",   # 次要文字
+    "accent":       "#1A73E8",   # Google 蓝
+    "accent_hi":    "#1967D2",
+    "accent_press": "#174EA6",
+    "green":        "#188038",   # Google 绿
+    "green_hi":     "#1E8E3E",
+    "green_press":  "#137333",
+    "orange":       "#E8710A",   # Google 橙
+    "border":       "#DADCE0",
+    "select":       "#D2E3FC",
+    "disabled_bg":  "#F1F3F4",
+    "disabled_fg":  "#9AA0A6",
 }
-WINDOW_ALPHA = 0.95              # Linux/X11 毛玻璃：整窗半透明（Wayland 会忽略，1.0 关闭）
+WINDOW_ALPHA = 1.0               # 浅色主题不用半透明
 
 
 def _win_glass(root):
-    """Windows 11 真毛玻璃：深色标题栏 + Acrylic 背景模糊（静默失败）。"""
+    """Windows 11 毛玻璃：Mica 背景（跟随系统明暗）。"""
     try:
         import ctypes
         hwnd = ctypes.windll.user32.GetAncestor(root.winfo_id(), 2)   # GA_ROOT
         dwm = ctypes.windll.dwmapi
-        dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(ctypes.c_int(1)), 4)  # 深色标题栏
-        ok = dwm.DwmSetWindowAttribute(hwnd, 38, ctypes.byref(ctypes.c_int(3)), 4)  # Acrylic
-        if ok != 0:
-            dwm.DwmSetWindowAttribute(hwnd, 38, ctypes.byref(ctypes.c_int(2)), 4)  # 退回 Mica
+        dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(ctypes.c_int(0)), 4)  # 浅色标题栏
+        dwm.DwmSetWindowAttribute(hwnd, 38, ctypes.byref(ctypes.c_int(2)), 4)  # Mica
     except Exception:
         pass
 
@@ -390,28 +394,41 @@ def apply_modern_theme(root):
                 troughcolor=p["surface"], focuscolor=p["accent"])
     s.configure("TFrame", background=p["bg"])
     s.configure("TLabel", background=p["bg"], foreground=p["fg"])
-    s.configure("TLabelframe", background=p["bg"], bordercolor=p["surface"])
-    s.configure("TLabelframe.Label", background=p["bg"], foreground=p["accent"],
-                font=(ui_font, 10, "bold"))
+
+    # 分区彩色标题（Google 蓝/绿/橙）
+    s.configure("TLabelframe", background=p["bg"], bordercolor=p["border"])
+    for name, color in (("Blue", p["accent"]), ("Green", p["green"]),
+                        ("Orange", p["orange"])):
+        s.configure(f"{name}.TLabelframe", background=p["bg"],
+                    bordercolor=p["border"])
+        s.configure(f"{name}.TLabelframe.Label", background=p["bg"],
+                    foreground=color, font=(ui_font, 10, "bold"))
+
     s.configure("TButton", background=p["surface"], foreground=p["fg"],
                 borderwidth=0, padding=(12, 6), focusthickness=0)
     s.map("TButton",
-          background=[("active", "#3b3d52"), ("pressed", p["accent"]),
+          background=[("active", "#E8EAED"), ("pressed", p["select"]),
                       ("disabled", p["disabled_bg"])],
-          foreground=[("pressed", "#14141f"), ("disabled", p["disabled_fg"])])
-    s.configure("Accent.TButton", background=p["accent"], foreground="#14141f",
+          foreground=[("disabled", p["disabled_fg"])])
+    s.configure("Accent.TButton", background=p["accent"], foreground="#FFFFFF",
                 font=(ui_font, 10, "bold"))
     s.map("Accent.TButton",
           background=[("active", p["accent_hi"]), ("pressed", p["accent_press"]),
                       ("disabled", p["disabled_bg"])],
           foreground=[("disabled", p["disabled_fg"])])
+    s.configure("Green.TButton", background=p["green"], foreground="#FFFFFF",
+                font=(ui_font, 10, "bold"))
+    s.map("Green.TButton",
+          background=[("active", p["green_hi"]), ("pressed", p["green_press"]),
+                      ("disabled", p["disabled_bg"])],
+          foreground=[("disabled", p["disabled_fg"])])
     s.configure("TEntry", fieldbackground=p["field"], foreground=p["fg"],
-                insertcolor=p["fg"], bordercolor=p["surface"], padding=4)
+                insertcolor=p["fg"], bordercolor=p["border"], padding=4)
     s.map("TEntry", fieldbackground=[("disabled", p["disabled_bg"])],
           foreground=[("disabled", p["disabled_fg"])])
     s.configure("TCombobox", fieldbackground=p["field"], foreground=p["fg"],
-                background=p["surface"], arrowcolor=p["fg"],
-                bordercolor=p["surface"], padding=4)
+                background=p["surface"], arrowcolor=p["subtle"],
+                bordercolor=p["border"], padding=4)
     s.map("TCombobox",
           fieldbackground=[("readonly", p["field"]), ("disabled", p["disabled_bg"])],
           foreground=[("readonly", p["fg"]), ("disabled", p["disabled_fg"])],
@@ -419,16 +436,16 @@ def apply_modern_theme(root):
     root.option_add("*TCombobox*Listbox.background", p["field"])
     root.option_add("*TCombobox*Listbox.foreground", p["fg"])
     root.option_add("*TCombobox*Listbox.selectBackground", p["accent"])
-    root.option_add("*TCombobox*Listbox.selectForeground", "#14141f")
+    root.option_add("*TCombobox*Listbox.selectForeground", "#FFFFFF")
     s.configure("TCheckbutton", background=p["bg"], foreground=p["fg"])
     s.map("TCheckbutton", background=[("active", p["bg"])],
-          indicatorcolor=[("selected", p["accent"]), ("!selected", p["surface"])])
-    s.configure("TSeparator", background=p["surface"])
-    s.configure("Vertical.TScrollbar", background=p["surface"], troughcolor=p["bg"],
-                bordercolor=p["bg"], arrowcolor=p["fg"])
-    s.configure("Status.TLabel", background="#14141f", foreground=p["subtle"])
+          indicatorcolor=[("selected", p["accent"]), ("!selected", "#FFFFFF")])
+    s.configure("TSeparator", background=p["border"])
+    s.configure("Vertical.TScrollbar", background=p["border"], troughcolor=p["bg"],
+                bordercolor=p["bg"], arrowcolor=p["subtle"])
+    s.configure("Status.TLabel", background=p["surface"], foreground=p["subtle"])
 
-    # 毛玻璃
+    # Windows 毛玻璃；Linux/X11 半透明（浅色主题默认关闭）
     if IS_WIN:
         _win_glass(root)
     elif WINDOW_ALPHA < 1.0:
@@ -438,10 +455,10 @@ def apply_modern_theme(root):
             pass
 
 
-TEXT_STYLE = dict(bg="#14141f", fg="#cdd6f4", insertbackground="#cdd6f4",
-                  selectbackground="#313244", relief="flat", padx=8, pady=6,
-                  highlightthickness=1, highlightbackground="#313244",
-                  highlightcolor="#89b4fa")
+TEXT_STYLE = dict(bg="#FFFFFF", fg="#202124", insertbackground="#202124",
+                  selectbackground="#D2E3FC", relief="flat", padx=8, pady=6,
+                  highlightthickness=1, highlightbackground="#DADCE0",
+                  highlightcolor="#1A73E8")
 
 
 # ---------------------------------------------------------------------------
@@ -490,7 +507,7 @@ class NetTesterGUI:
         main.pack(fill=tk.BOTH, expand=True)
 
         # 左侧设置面板
-        left = ttk.LabelFrame(main, text=" 设置 ", padding=8)
+        left = ttk.LabelFrame(main, text=" 设置 ", padding=8, style="Blue.TLabelframe")
         left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 6))
 
         ttk.Label(left, text="工作模式").grid(row=0, column=0, sticky=tk.W, pady=2)
@@ -535,13 +552,18 @@ class NetTesterGUI:
 
         ttk.Separator(left).grid(row=9, column=0, columnspan=2, sticky=tk.EW, pady=8)
 
-        self.stats_lbl = ttk.Label(left, text="发送: 0 B / 0 包\n接收: 0 B / 0 包",
-                                   justify=tk.LEFT)
-        self.stats_lbl.grid(row=10, column=0, columnspan=2, sticky=tk.W, pady=2)
+        self.stats_tx_lbl = tk.Label(left, text="发送: 0 B / 0 包",
+                                     fg=PALETTE["accent"], bg=PALETTE["bg"],
+                                     anchor=tk.W, justify=tk.LEFT)
+        self.stats_tx_lbl.grid(row=10, column=0, columnspan=2, sticky=tk.W, pady=2)
+        self.stats_rx_lbl = tk.Label(left, text="接收: 0 B / 0 包",
+                                     fg=PALETTE["green"], bg=PALETTE["bg"],
+                                     anchor=tk.W, justify=tk.LEFT)
+        self.stats_rx_lbl.grid(row=11, column=0, columnspan=2, sticky=tk.W, pady=2)
         self.rate_lbl = ttk.Label(left, text="速率 ↑ 0 B/s  ↓ 0 B/s")
-        self.rate_lbl.grid(row=11, column=0, columnspan=2, sticky=tk.W, pady=2)
+        self.rate_lbl.grid(row=12, column=0, columnspan=2, sticky=tk.W, pady=2)
         ttk.Button(left, text="统计清零", command=self._reset_stats).grid(
-            row=12, column=0, columnspan=2, sticky=tk.EW, pady=(4, 0))
+            row=13, column=0, columnspan=2, sticky=tk.EW, pady=(4, 0))
 
         left.columnconfigure(0, weight=1)
 
@@ -550,11 +572,13 @@ class NetTesterGUI:
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # 发送区先按底部占位（窗口高度不足时优先保住，不被接收区挤掉）
-        tx_frame = ttk.LabelFrame(right, text=" 发送 ", padding=4)
+        tx_frame = ttk.LabelFrame(right, text=" 发送 ", padding=4,
+                                  style="Orange.TLabelframe")
         tx_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(6, 0))
 
         # 接收区
-        rx_frame = ttk.LabelFrame(right, text=" 接收 ", padding=4)
+        rx_frame = ttk.LabelFrame(right, text=" 接收 ", padding=4,
+                                  style="Green.TLabelframe")
         rx_frame.pack(fill=tk.BOTH, expand=True)
         self.rx_text = scrolledtext.ScrolledText(rx_frame, state=tk.DISABLED,
                                                  font=(MONO_FONT, 10), wrap=tk.NONE,
@@ -579,7 +603,7 @@ class NetTesterGUI:
         self.rand_size.insert(0, "512")
         self.rand_size.pack(side=tk.LEFT, padx=4)
         ttk.Label(rand_row, text="字节").pack(side=tk.LEFT)
-        self.rand_btn = ttk.Button(rand_row, text="发送随机包",
+        self.rand_btn = ttk.Button(rand_row, text="发送随机包", style="Green.TButton",
                                    command=lambda: self._send(random_pkt=True))
         self.rand_btn.pack(side=tk.LEFT, padx=10)
 
@@ -881,9 +905,10 @@ class NetTesterGUI:
             self._last_rate_t = now
             self._last_tx = self.tx_bytes
             self._last_rx = self.rx_bytes
-        self.stats_lbl.config(
-            text=f"发送: {pretty_bytes(self.tx_bytes)} / {self.tx_pkts} 包\n"
-                 f"接收: {pretty_bytes(self.rx_bytes)} / {self.rx_pkts} 包")
+        self.stats_tx_lbl.config(
+            text=f"发送: {pretty_bytes(self.tx_bytes)} / {self.tx_pkts} 包")
+        self.stats_rx_lbl.config(
+            text=f"接收: {pretty_bytes(self.rx_bytes)} / {self.rx_pkts} 包")
         self.root.after(500, self._update_stats)
 
     # ---------------- 退出 ----------------
