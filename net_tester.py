@@ -25,6 +25,7 @@ import time
 try:
     import tkinter as tk
     from tkinter import ttk, scrolledtext, messagebox
+    from tkinter import font as tkfont
 except ModuleNotFoundError:                 # 允许无 GUI 环境仅使用网络层
     tk = None
 
@@ -586,23 +587,17 @@ class NetTesterGUI:
         main.pack(fill=tk.BOTH, expand=True)
 
         # 左栏：会话联系人列表 + 发起新会话按钮（类微信）
+        # 列表宽度按最长条目自适应（_fit_contact_width），无需横向滚动条
         contact_col = ttk.Frame(main)
         contact_col.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 6))
-        list_wrap = ttk.Frame(contact_col)
-        list_wrap.pack(fill=tk.BOTH, expand=True)
-        # 长条目（IP:端口 + 通道标签 + 未读数）可能超出列宽，横向滚动条兜底
-        xscroll = ttk.Scrollbar(list_wrap, orient=tk.HORIZONTAL)
-        xscroll.pack(side=tk.BOTTOM, fill=tk.X)
         self.contact_list = tk.Listbox(
-            list_wrap, width=32, bg="#FFFFFF", fg=PALETTE["fg"],
+            contact_col, width=22, bg="#FFFFFF", fg=PALETTE["fg"],
             selectbackground=PALETTE["select"],
             selectforeground=PALETTE["accent_press"],
             relief="flat", highlightthickness=1,
             highlightbackground=PALETTE["border"],
             highlightcolor=PALETTE["accent"],
-            activestyle="none", exportselection=False,
-            xscrollcommand=xscroll.set)
-        xscroll.config(command=self.contact_list.xview)
+            activestyle="none", exportselection=False)
         self.contact_list.pack(fill=tk.BOTH, expand=True)
         self.contact_list.bind("<<ListboxSelect>>", self._on_contact_pick)
         self.contact_list.bind("<Button-3>", self._on_contact_menu)
@@ -1029,6 +1024,18 @@ class NetTesterGUI:
                 keys.append(k)
         return keys
 
+    def _fit_contact_width(self):
+        """联系人列表宽度按最长条目自适应：用列表字体实测像素宽，
+        换算成字符宽度，夹在 [22, 60] 之间。"""
+        f = tkfont.Font(font=self.contact_list.cget("font"))
+        unit = f.measure("0") or 7
+        widest = 0
+        for i in range(self.contact_list.size()):
+            widest = max(widest, f.measure(self.contact_list.get(i)))
+        chars = max(22, min(60, widest // unit + 2))
+        if chars != int(self.contact_list.cget("width")):
+            self.contact_list.config(width=chars)
+
     def _refresh_contacts(self):
         """重建联系人列表，保持当前选中态，并同步聊天区标题。"""
         keys = self._all_convo_keys()
@@ -1038,6 +1045,7 @@ class NetTesterGUI:
             n = self._unread.get(k, 0)
             disp = self._display(k)
             self.contact_list.insert(tk.END, f"{disp}  [{n}]" if n else disp)
+        self._fit_contact_width()
         if self.current_peer in keys:
             idx = keys.index(self.current_peer)
             self.contact_list.selection_set(idx)

@@ -204,6 +204,10 @@ def phase5c():
     assert gui._cstats[PEER][1] >= 3, \
         f"循环包应发往锁定的 PEER: {gui._cstats[PEER]}"
     assert gui._cstats[TCP_CKEY][1] == TCP_TX0, "切走后 TCP 会话不应收到循环包"
+    root.after(250, phase5d)        # 等在途 loopback 包落地再清零
+
+
+def phase5d():
     # 切回 UDP 会话，第一个通道仍能自发自收
     gui._select_convo(PEER)
     gui._reset_stats()
