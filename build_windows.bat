@@ -3,7 +3,7 @@ REM Windows 一键打包 NetTester.exe
 REM 前提：已安装 Python 3.10+（安装时勾选 "Add python.exe to PATH"）
 cd /d "%~dp0"
 python -m pip install --upgrade pyinstaller || goto :err
-python -m PyInstaller --onefile --windowed --name NetTester net_tester.py || goto :err
+python -m PyInstaller --onefile --windowed --name NetTester --icon assets/icon.ico --add-data "assets;assets" net_tester.py || goto :err
 echo.
 echo 打包完成：dist\NetTester.exe
 pause

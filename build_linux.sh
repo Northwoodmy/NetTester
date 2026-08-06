@@ -3,5 +3,5 @@
 set -e
 cd "$(dirname "$0")"
 PYI=${PYI:-pyinstaller}
-$PYI --onefile --windowed --name NetTester net_tester.py
+$PYI --onefile --windowed --name NetTester --add-data "assets:assets" net_tester.py
 echo "打包完成：dist/NetTester"

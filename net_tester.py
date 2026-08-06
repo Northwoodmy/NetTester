@@ -42,6 +42,13 @@ MONO_FONT = "Consolas" if sys.platform == "win32" else "Monospace"
 IS_WIN = sys.platform == "win32"
 
 
+def resource_path(name: str) -> str:
+    """打包/源码两用的资源路径：PyInstaller 单文件运行时资源在
+    sys._MEIPASS 临时目录，源码运行时在脚本所在目录。"""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, name)
+
+
 def format_hex(data: bytes) -> str:
     """字节串转空格分隔的十六进制显示。"""
     return " ".join(f"{b:02X}" for b in data)
@@ -829,6 +836,15 @@ class NetTesterGUI:
         root.title("TCP/UDP 网络测试工具")
         root.withdraw()              # 先藏：无边框改造完成后才出场，避免闪框
         self._borderless = False     # 去装饰是否成功（失败则隐藏自定义标题栏）
+        # 窗口图标（任务栏/Alt-Tab/dock；缺文件不影响运行）
+        self._app_icons = []
+        try:
+            self._app_icons = [
+                tk.PhotoImage(file=resource_path(f"assets/icon_{s}.png"))
+                for s in (16, 32, 48, 256)]
+            root.iconphoto(True, *self._app_icons)
+        except tk.TclError:
+            self._app_icons = []
 
         self.channels = {}               # 通道 cid -> worker；cid = 协议:地址:端口
         self.msg_queue: queue.Queue = queue.Queue()
@@ -1100,10 +1116,17 @@ class NetTesterGUI:
         }
         self._tb_drag_start = None     # Windows 手动拖动起点
 
+        drag_widgets = [bar]
+        if self._app_icons:
+            app_ic = tk.Label(bar, image=self._app_icons[0],
+                              bg=p["surface"], bd=0)
+            app_ic.pack(side=tk.LEFT, padx=(10, 0))
+            drag_widgets.append(app_ic)
         title = tk.Label(bar, text="TCP/UDP 网络测试工具",
                          bg=p["surface"], fg=p["fg"],
                          font=(self._ui_font, 9))
-        title.pack(side=tk.LEFT, padx=(10, 0))
+        title.pack(side=tk.LEFT, padx=(6, 0))
+        drag_widgets.append(title)
 
         self._tb_close = self._tb_button(bar, "close", self._on_close)
         self._tb_close.pack(side=tk.RIGHT)
@@ -1112,7 +1135,7 @@ class NetTesterGUI:
         self._tb_min = self._tb_button(bar, "min", self.root.iconify)
         self._tb_min.pack(side=tk.RIGHT)
 
-        for wgt in (bar, title):
+        for wgt in drag_widgets:
             wgt.bind("<Button-1>", self._tb_press)
             wgt.bind("<B1-Motion>", self._tb_drag)
             wgt.bind("<Double-1>", lambda _e: self._toggle_maximize())

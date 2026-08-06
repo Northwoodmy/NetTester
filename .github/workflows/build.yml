@@ -36,8 +36,17 @@ jobs:
       - name: Install PyInstaller
         run: python -m pip install pyinstaller
 
-      - name: Build
-        run: python -m PyInstaller --onefile --windowed --name NetTester net_tester.py
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: python -m PyInstaller --onefile --windowed --name NetTester --icon assets/icon.ico --add-data "assets;assets" net_tester.py
+
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: python -m PyInstaller --onefile --windowed --name NetTester --icon assets/icon.icns --add-data "assets:assets" net_tester.py
+
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: python -m PyInstaller --onefile --windowed --name NetTester --add-data "assets:assets" net_tester.py
 
       - name: Zip macOS app bundle
         if: runner.os == 'macOS'
