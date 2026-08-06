@@ -732,6 +732,14 @@ class NetTesterGUI:
         return {"udp": f"UDP·{p}", "tcps": f"TCP·{p}", "tcpc": "TCP"}[proto]
 
     @staticmethod
+    def _chan_disp(cid: str) -> str:
+        """通道的展示名：UDP·50021 / TCP·9000 / TCP→host:port。"""
+        proto, h, p = cid.split(":", 2)
+        if proto == "tcpc":
+            return f"TCP→{h}:{p}"
+        return f"{'UDP' if proto == 'udp' else 'TCP'}·{p}"
+
+    @staticmethod
     def _peer_of(ckey: str) -> str:
         return ckey.rsplit("|", 1)[1]
 
@@ -908,15 +916,26 @@ class NetTesterGUI:
                        activeborderwidth=0,
                        font=(self._ui_font, 10))
         if cid in self.channels:
-            menu.add_command(label=f"关闭通道 {self._cid_tag(cid)}",
+            menu.add_command(label=f"关闭通道 {self._chan_disp(cid)}",
                              command=lambda: self._close_channel(cid))
         else:
-            menu.add_command(label="通道已关闭", state=tk.DISABLED)
+            menu.add_command(label=f"重新打开通道 {self._chan_disp(cid)}",
+                             command=lambda: self._reopen_channel(cid))
         menu.add_command(label="删除会话记录",
                          command=lambda: self._delete_convo(ckey))
         # 不要在这里 grab_release：tk_popup 的全局抓取会把「点击菜单外部」
         # 路由给菜单从而自动关闭；立即释放抓取会导致菜单点不掉
         menu.tk_popup(event.x_root, event.y_root)
+
+    def _reopen_channel(self, cid: str):
+        """重开已关闭的通道：UDP/TCP 监听按原地址绑定，TCP 连接重新拨号。"""
+        proto, host, port = cid.split(":", 2)
+        if proto == "tcpc":
+            ckey = self._connect_tcp_client(host, int(port))
+            if ckey:
+                self._select_convo(ckey)
+        else:
+            self._open_channel(proto, host, port)
 
     def _delete_convo(self, ckey: str):
         """删除会话记录：清聊天记录并从列表移除（不影响通道）。"""

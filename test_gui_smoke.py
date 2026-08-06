@@ -242,11 +242,16 @@ def phase6():
     gui._delete_convo(PEER)
     assert PEER not in gui._convos and PEER not in gui._convo_keys, "会话未删除"
     assert gui.current_peer is None, "删除当前会话后应无选中"
-    # 重开第一个通道：群发项恢复
-    assert gui._create_session("udp", "127.0.0.1", "19099"), "重新打开通道失败"
-    assert CID in gui.channels
+    # 右键菜单的重开通道：UDP 按原地址重新绑定，群发项恢复
+    gui._reopen_channel(CID)
+    assert CID in gui.channels, "重开 UDP 通道失败"
     assert GROUP in gui._convo_keys, "重开后群发项应恢复"
     assert "已关闭" not in gui._display(GROUP), "重开后不应再标注已关闭"
+    # TCP 连接通道重开 = 重新拨号，并自动选中该会话
+    tcp_cid = f"tcpc:127.0.0.1:{ECHO_PORT}"
+    gui._reopen_channel(tcp_cid)
+    assert tcp_cid in gui.channels, "重开 TCP 连接失败"
+    assert gui.current_peer == TCP_CKEY, "TCP 重连后应选中该会话"
     gui._close_all_channels()
     root.destroy()
     print("GUI 冒烟测试通过（对话框/多通道/多协议/群发/忽略本机/删除会话）")
