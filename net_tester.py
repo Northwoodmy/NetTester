@@ -1172,7 +1172,10 @@ class NetTesterGUI:
         card._paintables = (card, top, l1, l2)
         for w in (card, top, l1, l2, badge):
             w.bind("<Button-1>", lambda _e, k=ckey: self._select_convo(k))
-            w.bind("<Button-3>", lambda e, k=ckey: self._on_contact_menu(k, e))
+            # 松开右键才弹菜单：若在按下时弹，随后的松开事件会被菜单抓取，
+            # 落在指针下的第一个菜单项上被当成点击（松手即触发）
+            w.bind("<ButtonRelease-3>",
+                   lambda e, k=ckey: self._on_contact_menu(k, e))
             w.bind("<Enter>", lambda _e, c=card: self._card_hover(c, True))
             w.bind("<Leave>", lambda _e, c=card: self._card_hover(c, False))
             w.bind("<MouseWheel>", self._on_cards_wheel)     # Win/macOS
