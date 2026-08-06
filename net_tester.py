@@ -874,8 +874,8 @@ class NetTesterGUI:
         self._crate = {}                 # ckey -> [时间, tx字节, rx字节]（速率基线）
         self._drafts = {}                # ckey -> (输入框文本, HEX发送勾选)
         self._clport = {}                # tcpc ckey -> 最后已知的本机端口
-        self._disp_opts = {}             # ckey -> (HEX显示, 时间戳)；未配置的
-                                         # 会话跟随勾选框当前值（= 最后用的那套）
+        self._disp_opts = {}             # ckey -> (HEX显示, 时间戳)，会话创建
+                                         # 时落地默认值 (False, True)，各自独立
         self.current_peer = None         # 当前选中的会话 ckey
         self._cli_cfg = {}               # CLI 参数（--open 建会话 & 对话框预填）
         self._last_visible = None        # 联系人列表变化检测缓存
@@ -1890,6 +1890,9 @@ class NetTesterGUI:
     def _ensure_convo(self, ckey: str) -> bool:
         is_new = ckey not in self._convos
         self._convos.setdefault(ckey, [])
+        # 新会话落地默认显示配置（HEX 关、时间戳开）：每个对话的配置
+        # 从创建起就各自独立，切换/新建都不会互相影响
+        self._disp_opts.setdefault(ckey, (False, True))
         return is_new
 
     def _select_convo(self, peer: str):
@@ -1906,12 +1909,12 @@ class NetTesterGUI:
             if text:
                 self.tx_text.insert("1.0", text)
             self.tx_hex_var.set(hex_on)
-        # 该会话有独立显示配置则加载到勾选框；没有则保持当前值
-        # （未配置的会话跟随最后用的那套配置）
-        opts = self._disp_opts.get(peer)
-        if opts is not None:
-            self.rx_hex_var.set(opts[0])
-            self.rx_ts_var.set(opts[1])
+        # 加载该会话自己的显示配置（每个对话独立，新建时为默认值；
+        # 走 _opts_of 以覆盖「TCP Server 已接入但未收发」这类尚未
+        # 落地配置的卡片，勾选框与渲染口径始终一致）
+        opts = self._opts_of(peer)
+        self.rx_hex_var.set(opts[0])
+        self.rx_ts_var.set(opts[1])
         self.current_peer = peer
         self._unread.pop(peer, None)
         self._refresh_contacts()
@@ -2006,9 +2009,9 @@ class NetTesterGUI:
             del msgs[:MAX_CONVO_MSGS // 2]
 
     def _opts_of(self, ckey: str):
-        """该会话的显示配置 (HEX显示, 时间戳)；未配置跟随勾选框当前值。"""
-        return self._disp_opts.get(
-            ckey, (self.rx_hex_var.get(), self.rx_ts_var.get()))
+        """该会话的显示配置 (HEX显示, 时间戳)；创建时即落地默认值，
+        这里的回退只是防御（如会话记录被异常清掉）。"""
+        return self._disp_opts.get(ckey, (False, True))
 
     def _fmt_ts(self, t: float, ts_on: bool) -> str:
         if not ts_on:

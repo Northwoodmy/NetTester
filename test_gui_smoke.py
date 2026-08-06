@@ -191,24 +191,29 @@ def phase5():
     assert gui._disp_opts[TCP_CKEY] == (True, False)
     assert not re.search(r"\[\d{2}:\d{2}:\d{2}", gui.rx_text.get("1.0", tk.END)), \
         "关掉时间戳后不应有时间前缀"
-    # 切到 UDP 会话（未配置过）：跟随当前勾选值，不产生独立配置
+    # 切到 UDP 会话：配置各自独立，不受 TCP 会话影响（仍是默认值）
     gui._select_convo(PEER)
-    assert PEER not in gui._disp_opts, "未拨动勾选框不应产生独立配置"
-    assert gui.rx_hex_var.get() is True, "未配置会话应跟随当前勾选值"
-    # 给 UDP 会话配成文本显示
-    gui.rx_hex_var.set(False)
-    gui._rerender()
-    assert gui._disp_opts[PEER] == (False, False)
+    assert gui._disp_opts[PEER] == (False, True), "新会话应为默认显示配置"
+    assert gui.rx_hex_var.get() is False and gui.rx_ts_var.get() is True, \
+        "勾选框应加载 UDP 会话自己的配置"
     assert "hello udp" in gui.rx_text.get("1.0", tk.END), "UDP 历史应为文本"
+    # UDP 会话开 HEX，同样不影响 TCP 会话
+    gui.rx_hex_var.set(True)
+    gui._rerender()
+    assert gui._disp_opts[PEER] == (True, True)
+    assert "68 65 6C 6C 6F" in gui.rx_text.get("1.0", tk.END)
     # 切回 TCP：独立配置恢复（HEX 开、时间戳关）
     gui._select_convo(TCP_CKEY)
     assert gui.rx_hex_var.get() is True and gui.rx_ts_var.get() is False, \
         "切回应恢复 TCP 会话的独立配置"
-    assert "68 65 6C 6C 6F" in gui.rx_text.get("1.0", tk.END)
-    # 复位 TCP 会话的显示配置，避免影响后续阶段
+    # 复位两个会话的显示配置，避免影响后续阶段
     gui.rx_hex_var.set(False)
     gui.rx_ts_var.set(True)
     gui._rerender()
+    gui._select_convo(PEER)
+    gui.rx_hex_var.set(False)
+    gui._rerender()
+    gui._select_convo(TCP_CKEY)
     root.after(200, phase5b)
 
 
