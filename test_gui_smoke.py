@@ -268,10 +268,15 @@ def phase6():
     assert cid2 in gui.channels and tcp_cid in gui.channels, \
         f"两个并行 TCP 通道应并存: {list(gui.channels)}"
     assert gui.current_peer == ckey2, f"应选中新并行会话: {gui.current_peer}"
-    # 同目标卡片的区分靠第一行的 #n 序号
-    assert gui._card_lines(ckey2)[0] == f"127.0.0.1:{ECHO_PORT} #2", \
-        f"并行连接卡片应带序号: {gui._card_lines(ckey2)}"
-    assert " #2" in gui._display(ckey2), "显示名应带 #2 序号"
+    # 同目标卡片靠第二行的本机端口区分（类似 UDP 样式）
+    peer = f"127.0.0.1:{ECHO_PORT}"
+    lp1 = gui.channels[tcp_cid].local_port(peer)
+    lp2 = gui.channels[cid2].local_port(peer)
+    assert lp1 and lp2 and lp1 != lp2, "并行连接的本机端口应不同"
+    assert gui._card_lines(ckey2) == (peer, f"本机 TCP·{lp2}"), \
+        f"卡片第二行应为本机端口: {gui._card_lines(ckey2)}"
+    assert gui._card_lines(TCP_CKEY) == (peer, f"本机 TCP·{lp1}")
+    assert f"[TCP·{lp2}]" in gui._display(ckey2), "显示名应带本机端口"
     # 向 #2 发送，echo 只应回到 #2 自己的会话
     gui.tx_hex_var.set(False)
     gui.tx_text.delete("1.0", tk.END)
@@ -289,14 +294,22 @@ def phase7():
     rx1 = b"".join(d for dr, d, _ in gui._convos[TCP_CKEY] if dr == "rx")
     assert b"via-conn2" not in rx1, "#2 的流量不应串到首个连接"
     # 断开 #2：只收掉 #2 自己的通道，首个连接不受影响
+    lp2 = gui._clport[ckey2]
     gui._disconnect_peer(ckey2)
     assert cid2 not in gui.channels and tcp_cid in gui.channels, \
         "断开 #2 不应影响首个连接"
-    assert "已关闭" in gui._card_lines(ckey2)[1], "#2 断开后卡片应标注已关闭"
-    # 重开 #2 通道：沿用 #2 id 回到原卡片，聊天记录延续
+    # 墓碑显示：断开后仍保留最后已知的本机端口
+    assert gui._card_lines(ckey2)[1] == f"本机 TCP·{lp2} · 已关闭", \
+        f"断开后应保留端口作墓碑: {gui._card_lines(ckey2)}"
+    # 重开 #2 通道：沿用原 id 回到原卡片，聊天记录延续
     gui._reopen_channel(cid2)
     assert cid2 in gui.channels and gui.current_peer == ckey2, "重开 #2 失败"
     assert gui._convos[ckey2], "重开后原聊天记录应保留"
+    # 重连换了新 socket，显示应跟着刷新为新本机端口
+    peer = f"127.0.0.1:{ECHO_PORT}"
+    new_lp2 = gui.channels[cid2].local_port(peer)
+    assert gui._clport[ckey2] == new_lp2, "重连后端口记录应更新"
+    assert gui._card_lines(ckey2)[1] == f"本机 TCP·{new_lp2}"
     # 再断开，改走「重新连接」：同样回到原卡片
     gui._disconnect_peer(ckey2)
     gui._reconnect_peer(ckey2)

@@ -229,10 +229,21 @@ class TCPClientWorker(BaseWorker):
         sock.settimeout(0.5)
         with self._lock:
             self.conns[key] = sock
-        self.on_event(f"已连接到 {key}")
+        self.on_event(f"已连接到 {key}（本机端口 {sock.getsockname()[1]}）")
         threading.Thread(target=self._conn_loop, args=(key, sock),
                          daemon=True).start()
         return key
+
+    def local_port(self, key: str):
+        """该连接的本机端口号；连接不存在返回 None。"""
+        with self._lock:
+            sock = self.conns.get(key)
+        if not sock:
+            return None
+        try:
+            return sock.getsockname()[1]
+        except OSError:
+            return None
 
     def _conn_loop(self, key: str, sock: socket.socket):
         while not self._stop.is_set():
@@ -862,6 +873,7 @@ class NetTesterGUI:
         self._cstats = {}                # ckey -> [tx字节, tx包数, rx字节, rx包数]
         self._crate = {}                 # ckey -> [时间, tx字节, rx字节]（速率基线）
         self._drafts = {}                # ckey -> (输入框文本, HEX发送勾选)
+        self._clport = {}                # tcpc ckey -> 最后已知的本机端口
         self.current_peer = None         # 当前选中的会话 ckey
         self._cli_cfg = {}               # CLI 参数（--open 建会话 & 对话框预填）
         self._last_visible = None        # 联系人列表变化检测缓存
@@ -1327,19 +1339,25 @@ class NetTesterGUI:
         proto, _h, p = cid.split(":", 2)
         return {"udp": f"UDP·{p}", "tcps": f"TCP·{p}", "tcpc": "TCP"}[proto]
 
-    @staticmethod
-    def _conn_no(cid: str) -> str:
-        """tcpc 并行连接的展示序号：cid 端口段带 #n 时返回 ' #n'，否则空串。"""
-        if cid.startswith("tcpc:") and "#" in cid:
-            return " #" + cid.rsplit("#", 1)[1]
-        return ""
+    def _live_lport(self, cid: str, peer: str):
+        """tcpc 会话当前连接的本机端口；通道关闭或连接已断返回 None。"""
+        w = self.channels.get(cid)
+        if isinstance(w, TCPClientWorker):
+            return w.local_port(peer)
+        return None
+
+    def _lport_of(self, cid: str, peer: str):
+        """tcpc 会话的展示端口：活着取实时端口，断了取最后记录（墓碑）。"""
+        return (self._live_lport(cid, peer)
+                or self._clport.get(f"{cid}|{peer}"))
 
     @staticmethod
     def _chan_disp(cid: str) -> str:
-        """通道的展示名：UDP·50021 / TCP·9000 / TCP→host:port（并行连接加 #n）。"""
+        """通道的展示名：UDP·50021 / TCP·9000 / TCP→host:port。"""
         proto, h, p = cid.split(":", 2)
         if proto == "tcpc":
-            return f"TCP→{h}:{p.split('#', 1)[0]}" + NetTesterGUI._conn_no(cid)
+            # 并行连接的 cid 端口段带内部 #n 后缀（tcpc:h:5000#2），不显示
+            return f"TCP→{h}:{p.split('#', 1)[0]}"
         return f"{'UDP' if proto == 'udp' else 'TCP'}·{p}"
 
     @staticmethod
@@ -1351,13 +1369,19 @@ class NetTesterGUI:
         return ckey.rsplit("|", 1)[0]
 
     def _display(self, ckey: str) -> str:
-        """联系人显示名：对端 [协议·端口]；并行连接加 #n，通道已关闭则标注。"""
+        """联系人显示名：对端 [协议·端口]；通道已关闭则标注。
+
+        tcpc 用本机端口作标签（[TCP·51234]，对齐 UDP 的 [UDP·50021]），
+        同目标的并行连接靠它区分。"""
         cid, peer = ckey.rsplit("|", 1)
         tag = self._cid_tag(cid)
+        if cid.startswith("tcpc:"):
+            lp = self._lport_of(cid, peer)
+            if lp:
+                tag = f"TCP·{lp}"
         if cid not in self.channels:
             tag += "·已关闭"
-        return (f"（群发）[{tag}]" if peer == "*"
-                else f"{peer}{self._conn_no(cid)} [{tag}]")
+        return f"（群发）[{tag}]" if peer == "*" else f"{peer} [{tag}]"
 
     # ---------------- 发起新会话（对话框：协议 + 地址 + 端口） ----------------
 
@@ -1589,6 +1613,7 @@ class NetTesterGUI:
         self._cstats.pop(ckey, None)
         self._crate.pop(ckey, None)
         self._drafts.pop(ckey, None)
+        self._clport.pop(ckey, None)
         if self.current_peer == ckey:
             self.current_peer = None
             self._clear_view()
@@ -1678,14 +1703,15 @@ class NetTesterGUI:
             self.channels[cid] = w
             self.status_var.set(f"通道已打开 [TCP]，共 {len(self.channels)} 个")
         try:
-            w.connect(host, port)
+            conn_key = w.connect(host, port)
         except OSError as e:
             self.status_var.set(f"连接 {host}:{port} 失败: {e}")
             if not w.conn_keys():               # 空通道不留
                 self.channels.pop(cid, None)
                 w.stop()
             return None
-        ckey = f"{cid}|{host}:{port}"
+        ckey = f"{cid}|{conn_key}"
+        self._clport[ckey] = w.local_port(conn_key)   # 界面区分并行连接用
         self._ensure_convo(ckey)
         return ckey
 
@@ -1722,14 +1748,16 @@ class NetTesterGUI:
         """卡片两行文本：第一行对端地址，第二行本机通道说明。"""
         cid, peer = ckey.rsplit("|", 1)
         proto, _h, p = cid.split(":", 2)
-        # tcpc 并行连接靠 _conn_no 的 #n 序号区分（同目标卡片对端地址相同）
-        line1 = "（群发）" if peer == "*" else peer + self._conn_no(cid)
+        line1 = "（群发）" if peer == "*" else peer
         if proto == "udp":
             line2 = f"本机 UDP·{p}"
         elif proto == "tcps":
             line2 = f"本机 TCP 监听·{p}"
         else:
-            line2 = "TCP 连接"           # TCP Client 本地是临时端口，不显示
+            # TCP Client 用本机临时端口区分同目标的并行连接（类似 UDP 样式）；
+            # 连接断了用最后记录的端口作墓碑显示
+            lp = self._lport_of(cid, peer)
+            line2 = f"本机 TCP·{lp}" if lp else "TCP 连接"
         if cid not in self.channels:
             line2 += " · 已关闭"
         elif peer != "*" and proto in ("tcps", "tcpc"):
