@@ -1051,7 +1051,7 @@ class NetTesterGUI:
         widest = 0
         for k in self._convo_keys:
             l1, l2 = self._card_lines(k)
-            badge_px = 34 if self._unread.get(k) else 0
+            badge_px = 42 if self._unread.get(k) else 0   # 角标最宽 "9999+"
             widest = max(widest, self._f_card1.measure(l1) + badge_px,
                          self._f_card2.measure(l2))
         width = max(180, min(340, widest + 16 + 10))  # 卡片内边距 + 栏内边距
@@ -1092,7 +1092,7 @@ class NetTesterGUI:
         n = self._unread.get(ckey, 0)
         badge = card._badge
         if n:
-            txt = str(n if n <= 99 else "99+")
+            txt = str(n if n <= 9999 else "9999+")
             if badge.cget("text") != txt:
                 badge.config(text=txt)
             if badge.winfo_manager() != "pack":
@@ -1124,7 +1124,7 @@ class NetTesterGUI:
                       font=self._f_card1)
         l1.pack(side=tk.LEFT, fill=tk.X, expand=True)
         n = self._unread.get(ckey, 0)
-        badge = tk.Label(top, text=str(n if n <= 99 else "99+"),
+        badge = tk.Label(top, text=str(n if n <= 9999 else "9999+"),
                          bg="#D93025", fg="#FFFFFF", font=self._f_badge,
                          padx=5, pady=1)
         if n:

@@ -234,6 +234,10 @@ def phase6():
     assert not gui.channels, "通道应全部关闭"
     assert PEER in gui._convo_keys, "关闭通道后会话应保留"
     assert "已关闭" in gui._display(PEER), "已关闭通道的会话应有标注"
+    # 未读角标上限：超过 9999 显示 9999+
+    gui._unread[PEER] = 10001
+    gui._update_card(PEER)
+    assert gui._cards[PEER]._badge.cget("text") == "9999+", "角标上限应为 9999+"
     # 右键菜单的删除会话：记录清空、列表移除、选中态复位
     gui._delete_convo(PEER)
     assert PEER not in gui._convos and PEER not in gui._convo_keys, "会话未删除"
