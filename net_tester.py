@@ -560,13 +560,14 @@ def apply_modern_theme(root):
         _THEME_IMAGES.append(img)
         return img
 
+    # 注意：element_create 的图像状态表是“先匹配优先”，具体状态必须放前面
     s.element_create("Chk.indicator", "image",
                      _chk_img(False, p["disabled_fg"], "#FFFFFF"),
-                     ("active", _chk_img(False, p["accent"], "#FFFFFF")),
-                     ("selected", _chk_img(True, p["accent"])),
-                     ("selected active", _chk_img(True, p["accent_hi"])),
+                     ("selected disabled", _chk_img(True, p["border"])),
                      ("disabled", _chk_img(False, p["border"], p["disabled_bg"])),
-                     ("selected disabled", _chk_img(True, p["border"])))
+                     ("selected active", _chk_img(True, p["accent_hi"])),
+                     ("selected", _chk_img(True, p["accent"])),
+                     ("active", _chk_img(False, p["accent"], "#FFFFFF")))
     s.layout("TCheckbutton", [
         ("Checkbutton.padding", {"sticky": "nswe", "children": [
             ("Chk.indicator", {"side": "left", "sticky": ""}),
@@ -601,8 +602,8 @@ def apply_modern_theme(root):
 
     s.element_create("Slim.trough", "image", _sb_trough, sticky="nswe")
     s.element_create("Slim.thumb", "image", _sb_thumb("#C4C7CB"),
-                     ("active", _sb_thumb(p["disabled_fg"])),
                      ("pressed", _sb_thumb("#80868B")),
+                     ("active", _sb_thumb(p["disabled_fg"])),
                      border=(2, 2, 10, 10), sticky="nswe")
     s.layout("Slim.Vertical.TScrollbar", [
         ("Slim.trough", {"sticky": "nswe", "children": [
