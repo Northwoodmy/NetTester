@@ -38,6 +38,7 @@ UDP_MAX_PAYLOAD = 65507          # UDP 数据报最大载荷
 RECV_BUF = 65536
 MAX_RX_LINES = 2000              # 接收区最大行数，超出裁剪
 MAX_CONVO_MSGS = 2000            # 每个会话最多保存的消息条数
+VERSION = "2.2.7"                # 与 release tag 对应，发版时同步递增
 MONO_FONT = "Consolas" if sys.platform == "win32" else "Monospace"
 IS_WIN = sys.platform == "win32"
 
@@ -1130,6 +1131,10 @@ class NetTesterGUI:
                          font=(self._ui_font, 9))
         title.pack(side=tk.LEFT, padx=(6, 0))
         drag_widgets.append(title)
+        ver = tk.Label(bar, text=f"v{VERSION}", bg=p["surface"],
+                       fg=p["subtle"], font=(self._ui_font, 8))
+        ver.pack(side=tk.LEFT, padx=(6, 0), pady=(2, 0))
+        drag_widgets.append(ver)
 
         self._tb_close = self._tb_button(bar, "close", self._on_close)
         self._tb_close.pack(side=tk.RIGHT)
