@@ -24,7 +24,7 @@ import time
 
 try:
     import tkinter as tk
-    from tkinter import ttk, scrolledtext, messagebox
+    from tkinter import ttk, messagebox
     from tkinter import font as tkfont
 except ModuleNotFoundError:                 # 允许无 GUI 环境仅使用网络层
     tk = None
@@ -541,6 +541,30 @@ def apply_modern_theme(root):
           background=[("active", "#BDC1C6"), ("pressed", p["disabled_fg"])])
     s.configure("Status.TLabel", background=p["surface"], foreground=p["subtle"])
 
+    # —— 细圆角滚动条：图像元素自绘，12px 无箭头，滑块悬停/按下变色 ——
+    _sb_keep = [tk.PhotoImage(width=12, height=4)]     # 全透明滑槽（防 GC）
+
+    def _sb_thumb(color):
+        img = tk.PhotoImage(width=12, height=24)       # 圆角滑块，两侧留 2px 透明
+        for y in range(24):
+            for x in range(2, 10):
+                dx = max(0, (6 - x) if x < 6 else (x - 5))
+                dy = max(0, (4 - y) if y < 4 else (y - 19))
+                if dx * dx + dy * dy <= 17:            # 半径 4 的圆角
+                    img.put(color, to=(x, y))
+        _sb_keep.append(img)
+        return img
+
+    s.element_create("Slim.trough", "image", _sb_keep[0], sticky="nswe")
+    s.element_create("Slim.thumb", "image", _sb_thumb("#C4C7CB"),
+                     ("active", _sb_thumb(p["disabled_fg"])),
+                     ("pressed", _sb_thumb("#80868B")),
+                     border=(2, 2, 10, 10), sticky="nswe")
+    s.layout("Slim.Vertical.TScrollbar", [
+        ("Slim.trough", {"sticky": "nswe", "children": [
+            ("Slim.thumb", {"sticky": "nswe"})]})])
+    apply_modern_theme._keep = _sb_keep
+
     # Windows 毛玻璃；Linux/X11 半透明（浅色主题默认关闭）
     if IS_WIN:
         _win_glass(root)
@@ -630,6 +654,7 @@ class NetTesterGUI:
                                         bg=PALETTE["surface"],
                                         highlightthickness=0)
         self._cards_scroll = ttk.Scrollbar(contact_col, orient=tk.VERTICAL,
+                                           style="Slim.Vertical.TScrollbar",
                                            command=self.contact_canvas.yview)
         # 滚动条按需显示：内容不足一屏时隐藏（yscrollcommand 回包可见比例）
         self.contact_canvas.configure(yscrollcommand=self._on_cards_scroll)
@@ -732,10 +757,17 @@ class NetTesterGUI:
                         command=self._refresh_ignore_cache).pack(side=tk.LEFT, padx=6)
 
         # —— 中间气泡聊天记录 ——
-        self.rx_text = scrolledtext.ScrolledText(
-            conv_col, state=tk.DISABLED, font=(MONO_FONT, 10), wrap=tk.CHAR,
-            height=12, **{**TEXT_STYLE, "bg": "#F5F5F5"})
-        self.rx_text.pack(fill=tk.BOTH, expand=True)
+        rx_wrap = tk.Frame(conv_col, bg="#F5F5F5")
+        rx_wrap.pack(fill=tk.BOTH, expand=True)
+        self._rx_scroll = ttk.Scrollbar(rx_wrap, orient=tk.VERTICAL,
+                                        style="Slim.Vertical.TScrollbar")
+        self._rx_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.rx_text = tk.Text(
+            rx_wrap, state=tk.DISABLED, font=(MONO_FONT, 10), wrap=tk.CHAR,
+            height=12, yscrollcommand=self._rx_scroll.set,
+            **{**TEXT_STYLE, "bg": "#F5F5F5"})
+        self.rx_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._rx_scroll.config(command=self.rx_text.yview)
         t = self.rx_text
         # 气泡：收到=左白，发出=右绿（微信配色）；meta=灰小字；sys=居中灰字
         t.tag_configure("rx", background="#FFFFFF", lmargin1=6, lmargin2=6,
