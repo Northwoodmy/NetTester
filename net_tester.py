@@ -1139,6 +1139,8 @@ class NetTesterGUI:
             wgt.bind("<Button-1>", self._tb_press)
             wgt.bind("<B1-Motion>", self._tb_drag)
             wgt.bind("<Double-1>", lambda _e: self._toggle_maximize())
+        # 外部途径改变最大化状态（Super+↑/拖到屏幕顶部平铺等）时同步图标
+        self.root.bind("<Configure>", self._on_root_configure, add="+")
 
     def _tb_button(self, bar, kind, cmd):
         """40x34 扁平按钮：悬停 min/max 变浅灰、close 变红底白叉。"""
@@ -1173,20 +1175,33 @@ class NetTesterGUI:
             return False
 
     def _sync_max_icon(self):
-        self._tb_max.config(image=self._tb_icons[
-            "restore" if self._is_zoomed() else "max"])
+        """按当前最大化状态同步按钮图标。X11 下状态经 WM 异步生效，
+        读回有延迟——调用方要么在状态已稳定后调（悬停/<Configure>/
+        延时回校），要么用 _toggle_maximize 的目标状态直设。"""
+        want = self._tb_icons["restore" if self._is_zoomed() else "max"]
+        if str(self._tb_max.cget("image")) != str(want):
+            self._tb_max.config(image=want)
 
     def _toggle_maximize(self):
+        target = not self._is_zoomed()
         try:
             if IS_WIN:
-                self.root.state("normal" if self.root.state() == "zoomed"
-                                else "zoomed")
+                self.root.state("zoomed" if target else "normal")
             else:
-                self.root.wm_attributes("-zoomed",
-                                        0 if self._is_zoomed() else 1)
+                self.root.wm_attributes("-zoomed", 1 if target else 0)
         except tk.TclError:
             return
-        self._sync_max_icon()
+        # 立即按目标状态换图标（X11 异步读回不可靠），200ms 后再按
+        # WM 实际状态回校一次
+        self._tb_max.config(
+            image=self._tb_icons["restore" if target else "max"])
+        self.root.after(200, self._sync_max_icon)
+
+    def _on_root_configure(self, e):
+        """窗口尺寸变化（含 Super+↑/拖到顶部平铺等外部最大化途径）
+        时同步最大化按钮图标。"""
+        if e.widget is self.root:
+            self._sync_max_icon()
 
     def _tb_press(self, e):
         """标题栏按下：Linux 让 WM 从指针位置原生拖动（direction 8=移动，
