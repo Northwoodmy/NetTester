@@ -6,7 +6,7 @@ net_tester.py — TCP/UDP 网络测试工具（GUI）
 功能：
   - 三种工作模式：TCP Server / TCP Client / UDP
   - 发送随机数据包（自定义大小）、手动发送（文本/HEX）、定时循环发送
-  - 接收数据显示（文本/HEX 切换、时间戳、来源地址）
+  - 接收数据显示（文本/HEX 切换、时间戳，均可按会话独立配置）
   - 收发统计（字节数、包数、实时速率）
 
 依赖：python3-tk（sudo apt install python3-tk）
@@ -874,6 +874,8 @@ class NetTesterGUI:
         self._crate = {}                 # ckey -> [时间, tx字节, rx字节]（速率基线）
         self._drafts = {}                # ckey -> (输入框文本, HEX发送勾选)
         self._clport = {}                # tcpc ckey -> 最后已知的本机端口
+        self._disp_opts = {}             # ckey -> (HEX显示, 时间戳)；未配置的
+                                         # 会话跟随勾选框当前值（= 最后用的那套）
         self.current_peer = None         # 当前选中的会话 ckey
         self._cli_cfg = {}               # CLI 参数（--open 建会话 & 对话框预填）
         self._last_visible = None        # 联系人列表变化检测缓存
@@ -1614,6 +1616,7 @@ class NetTesterGUI:
         self._crate.pop(ckey, None)
         self._drafts.pop(ckey, None)
         self._clport.pop(ckey, None)
+        self._disp_opts.pop(ckey, None)
         if self.current_peer == ckey:
             self.current_peer = None
             self._clear_view()
@@ -1903,6 +1906,12 @@ class NetTesterGUI:
             if text:
                 self.tx_text.insert("1.0", text)
             self.tx_hex_var.set(hex_on)
+        # 该会话有独立显示配置则加载到勾选框；没有则保持当前值
+        # （未配置的会话跟随最后用的那套配置）
+        opts = self._disp_opts.get(peer)
+        if opts is not None:
+            self.rx_hex_var.set(opts[0])
+            self.rx_ts_var.set(opts[1])
         self.current_peer = peer
         self._unread.pop(peer, None)
         self._refresh_contacts()
@@ -1996,29 +2005,36 @@ class NetTesterGUI:
         if len(msgs) > MAX_CONVO_MSGS:           # 每会话封顶，超出裁掉旧的一半
             del msgs[:MAX_CONVO_MSGS // 2]
 
-    def _fmt_ts(self, t: float) -> str:
-        if not self.rx_ts_var.get():
+    def _opts_of(self, ckey: str):
+        """该会话的显示配置 (HEX显示, 时间戳)；未配置跟随勾选框当前值。"""
+        return self._disp_opts.get(
+            ckey, (self.rx_hex_var.get(), self.rx_ts_var.get()))
+
+    def _fmt_ts(self, t: float, ts_on: bool) -> str:
+        if not ts_on:
             return ""
         return time.strftime("[%H:%M:%S", time.localtime(t)) + \
             f".{int(t * 1000) % 1000:03d}] "
 
-    def _fmt_body(self, data: bytes) -> str:
-        return format_hex(data) if self.rx_hex_var.get() \
+    @staticmethod
+    def _fmt_body(data: bytes, hex_on: bool) -> str:
+        return format_hex(data) if hex_on \
             else data.decode("utf-8", "replace")
 
     def _insert_msg(self, direction: str, ckey: str, data: bytes, t: float):
         """插一条气泡：meta 行（时间+对端）+ 正文。正文换行不带 tag，
-        背景只包住文字，形成气泡效果。"""
+        背景只包住文字，形成气泡效果。显示格式按该会话自己的配置。"""
+        hex_on, ts_on = self._opts_of(ckey)
         w = self.rx_text
-        ts = self._fmt_ts(t)
+        ts = self._fmt_ts(t, ts_on)
         peer = self._peer_of(ckey)
         disp = "（群发）" if peer == "*" else peer
         if direction == "tx":
             w.insert(tk.END, f"{ts}我 → {disp}\n", "tx_meta")
-            w.insert(tk.END, self._fmt_body(data), "tx")
+            w.insert(tk.END, self._fmt_body(data, hex_on), "tx")
         else:
             w.insert(tk.END, f"{ts}{disp}\n", "rx_meta")
-            w.insert(tk.END, self._fmt_body(data), "rx")
+            w.insert(tk.END, self._fmt_body(data, hex_on), "rx")
         w.insert(tk.END, "\n\n")
 
     def _rx_b1_down(self, _e):
@@ -2129,7 +2145,10 @@ class NetTesterGUI:
         w.config(state=tk.DISABLED)
 
     def _rerender(self):
+        """显示勾选框变更：存为当前会话的独立配置并按它重画历史。"""
         if self.current_peer is not None:
+            self._disp_opts[self.current_peer] = (
+                self.rx_hex_var.get(), self.rx_ts_var.get())
             self._render_chat(self.current_peer)
 
     def _log_event(self, text: str):

@@ -8,6 +8,7 @@
 """
 
 import os
+import re
 import socket
 import threading
 import tkinter as tk
@@ -179,6 +180,35 @@ def phase5():
     tcp_rx = b"".join(d for dr, d, _ in gui._convos[TCP_CKEY] if dr == "rx")
     assert b"echo:hello tcp" in tcp_rx, f"TCP 会话应收到 echo: {tcp_rx!r}"
     assert len(gui.channels) == 3, f"应 3 通道并存: {list(gui.channels)}"
+    # —— 每会话显示配置：TCP 会话开 HEX/关时间戳，不影响 UDP 会话 ——
+    gui.rx_hex_var.set(True)
+    gui._rerender()
+    assert gui._disp_opts[TCP_CKEY] == (True, True), "勾选应存为当前会话配置"
+    assert "68 65 6C 6C 6F" in gui.rx_text.get("1.0", tk.END), \
+        "HEX 开启后历史应按 HEX 重画"
+    gui.rx_ts_var.set(False)
+    gui._rerender()
+    assert gui._disp_opts[TCP_CKEY] == (True, False)
+    assert not re.search(r"\[\d{2}:\d{2}:\d{2}", gui.rx_text.get("1.0", tk.END)), \
+        "关掉时间戳后不应有时间前缀"
+    # 切到 UDP 会话（未配置过）：跟随当前勾选值，不产生独立配置
+    gui._select_convo(PEER)
+    assert PEER not in gui._disp_opts, "未拨动勾选框不应产生独立配置"
+    assert gui.rx_hex_var.get() is True, "未配置会话应跟随当前勾选值"
+    # 给 UDP 会话配成文本显示
+    gui.rx_hex_var.set(False)
+    gui._rerender()
+    assert gui._disp_opts[PEER] == (False, False)
+    assert "hello udp" in gui.rx_text.get("1.0", tk.END), "UDP 历史应为文本"
+    # 切回 TCP：独立配置恢复（HEX 开、时间戳关）
+    gui._select_convo(TCP_CKEY)
+    assert gui.rx_hex_var.get() is True and gui.rx_ts_var.get() is False, \
+        "切回应恢复 TCP 会话的独立配置"
+    assert "68 65 6C 6C 6F" in gui.rx_text.get("1.0", tk.END)
+    # 复位 TCP 会话的显示配置，避免影响后续阶段
+    gui.rx_hex_var.set(False)
+    gui.rx_ts_var.set(True)
+    gui._rerender()
     root.after(200, phase5b)
 
 
@@ -241,6 +271,7 @@ def phase6():
     # 右键菜单的删除会话：记录清空、列表移除、选中态复位
     gui._delete_convo(PEER)
     assert PEER not in gui._convos and PEER not in gui._convo_keys, "会话未删除"
+    assert PEER not in gui._disp_opts, "删除会话应清理其显示配置"
     assert gui.current_peer is None, "删除当前会话后应无选中"
     # 右键菜单的重开通道：UDP 按原地址重新绑定，群发项恢复
     gui._reopen_channel(CID)
@@ -317,7 +348,7 @@ def phase7():
     gui._close_all_channels()
     root.destroy()
     print("GUI 冒烟测试通过（对话框/多通道/多协议/群发/忽略本机/删除会话"
-          "/并行TCP客户端）")
+          "/并行TCP客户端/每会话显示配置）")
 
 
 root.after(1500, phase2)
