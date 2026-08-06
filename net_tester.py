@@ -1115,7 +1115,9 @@ class NetTesterGUI:
             "close": _tb_icon("close", p["fg"]),
             "close_hi": _tb_icon("close", "#FFFFFF"),
         }
-        self._tb_drag_start = None     # Windows 手动拖动起点
+        self._tb_drag_start = None     # Windows 手动拖动起点（兜底路径）
+        self._tb_drag_last = None      # 最近一次拖动坐标
+        self._tb_drag_job = None       # 16ms 节流定时器
 
         drag_widgets = [bar]
         if self._app_icons:
@@ -1206,10 +1208,11 @@ class NetTesterGUI:
 
     def _tb_press(self, e):
         """标题栏按下：拖动交给系统原生移动循环——Linux 发
-        _NET_WM_MOVERESIZE（direction 8=移动），Windows 在
-        ReleaseCapture 后发 WM_NCLBUTTONDOWN/HTCAPTION 进入系统移动
-        模态循环（还自带拖到顶部最大化/贴边平铺）。手动逐帧改
-        geometry 会堆积鼠标事件、刷新跟不上（拖动残影），仅作兜底。"""
+        _NET_WM_MOVERESIZE（direction 8=移动），Windows 投递
+        WM_NCLBUTTONDOWN/HTCAPTION 进入系统移动循环（自带拖到顶部
+        最大化/贴边平铺）。必须 PostMessage 异步投递：SendMessage
+        会让模态移动循环嵌套在 Tk 事件处理器内部启动，消息泵重入
+        即卡死、后续点击直接崩。手动拖动仅作兜底。"""
         if IS_WIN:
             self._tb_drag_start = None
             try:
@@ -1217,12 +1220,13 @@ class NetTesterGUI:
                     int(self.root.wm_frame(), 16)
                 u32 = ctypes.windll.user32
                 u32.ReleaseCapture()
-                u32.SendMessageW(ctypes.c_void_p(hwnd), 0x00A1, 2, 0)
+                u32.PostMessageW(ctypes.c_void_p(hwnd), 0x00A1, 2, 0)
             except Exception:
                 if self.root.state() != "zoomed":       # 失败退回手动拖
                     self._tb_drag_start = (e.x_root, e.y_root,
                                            self.root.winfo_x(),
                                            self.root.winfo_y())
+                    self._tb_drag_last = (e.x_root, e.y_root)
         else:
             try:
                 _x11_wm_moveresize(self.root, e.x_root, e.y_root, 8)
@@ -1230,10 +1234,21 @@ class NetTesterGUI:
                 pass
 
     def _tb_drag(self, e):
-        if IS_WIN and self._tb_drag_start:
-            sx, sy, wx, wy = self._tb_drag_start
-            self.root.geometry(f"+{wx + e.x_root - sx}"
-                               f"+{wy + e.y_root - sy}")
+        """手动拖动兜底：只记最新坐标，16ms 节流应用——逐事件改
+        geometry 在高回报率鼠标下会堆积、刷新跟不上（残影）。"""
+        if not (IS_WIN and self._tb_drag_start):
+            return
+        self._tb_drag_last = (e.x_root, e.y_root)
+        if self._tb_drag_job is None:
+            self._tb_drag_job = self.root.after(16, self._tb_drag_apply)
+
+    def _tb_drag_apply(self):
+        self._tb_drag_job = None
+        if not (IS_WIN and self._tb_drag_start and self._tb_drag_last):
+            return
+        sx, sy, wx, wy = self._tb_drag_start
+        lx, ly = self._tb_drag_last
+        self.root.geometry(f"+{wx + lx - sx}+{wy + ly - sy}")
 
     # ---------------- Linux 窗口边缘缩放（4px 热区环） ----------------
     # _edge 外框的 bd=4 形成一圈同色热区：内部被子控件占满，指针只有
