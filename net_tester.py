@@ -248,6 +248,22 @@ class TCPClientWorker(BaseWorker):
         with self._lock:
             return list(self.conns.keys())
 
+    def disconnect(self, key: str):
+        """断开单个连接；_conn_loop 收尾时从 conns 移除并发断开事件。"""
+        with self._lock:
+            sock = self.conns.get(key)
+        if not sock:
+            return
+        try:    # 先 shutdown 再 close：对端立刻收到 FIN（recv 阻塞时
+                # 单纯 close 因 fd 引用计数不会发 FIN）
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass
+
     def send(self, data: bytes, target: str):
         with self._lock:
             sock = self.conns.get(target)
@@ -328,6 +344,21 @@ class TCPServerWorker(BaseWorker):
     def client_keys(self):
         with self._lock:
             return list(self.clients.keys())
+
+    def disconnect(self, key: str):
+        """断开单个客户端连接（继续监听）；_client_loop 负责收尾。"""
+        with self._lock:
+            conn = self.clients.get(key)
+        if not conn:
+            return
+        try:    # 同 TCPClientWorker.disconnect：先 shutdown 再 close
+            conn.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            conn.close()
+        except OSError:
+            pass
 
     def send(self, data: bytes, target: str = None):
         """target 为客户端地址串；None 或 '所有连接' 表示广播。"""
@@ -905,9 +936,14 @@ class NetTesterGUI:
     # ---------------- 联系人右键菜单 ----------------
 
     def _on_contact_menu(self, ckey: str, event):
-        """右键会话卡片：关闭所在通道 / 删除会话记录。"""
+        """右键会话卡片：按卡片类型给出连接级/通道级操作。
+
+        普通会话卡片只动自己这条连接（断开/重连），不再误伤整个通道；
+        通道级关闭/重开只出现在（群发）卡片和已关闭的卡片上。"""
         self._select_convo(ckey)
         cid = self._chan_of(ckey)
+        peer = self._peer_of(ckey)
+        chan_open = cid in self.channels
         menu = tk.Menu(self.root, tearoff=0, bd=0, relief=tk.FLAT,
                        bg="#FFFFFF", fg=PALETTE["fg"],
                        activebackground=PALETTE["select"],
@@ -915,17 +951,51 @@ class NetTesterGUI:
                        disabledforeground=PALETTE["disabled_fg"],
                        activeborderwidth=0,
                        font=(self._ui_font, 10))
-        if cid in self.channels:
-            menu.add_command(label=f"关闭通道 {self._chan_disp(cid)}",
-                             command=lambda: self._close_channel(cid))
-        else:
+        if not chan_open:
             menu.add_command(label=f"重新打开通道 {self._chan_disp(cid)}",
                              command=lambda: self._reopen_channel(cid))
+        elif peer == "*":
+            menu.add_command(label=f"关闭通道 {self._chan_disp(cid)}",
+                             command=lambda: self._close_channel(cid))
+        elif cid.startswith(("tcps:", "tcpc:")):
+            w = self.channels[cid]
+            alive = peer in (w.client_keys() if cid.startswith("tcps:")
+                             else w.conn_keys())
+            if alive:
+                menu.add_command(label="断开此连接",
+                                 command=lambda: self._disconnect_peer(ckey))
+            elif cid.startswith("tcpc:"):
+                menu.add_command(label="重新连接",
+                                 command=lambda: self._reconnect_peer(ckey))
+            # TCP Server 的已断客户端只能等对方重连，不提供主动项
+        # UDP 普通会话无连接概念，只提供下面的删除项
         menu.add_command(label="删除会话记录",
                          command=lambda: self._delete_convo(ckey))
         # 不要在这里 grab_release：tk_popup 的全局抓取会把「点击菜单外部」
         # 路由给菜单从而自动关闭；立即释放抓取会导致菜单点不掉
         menu.tk_popup(event.x_root, event.y_root)
+
+    def _disconnect_peer(self, ckey: str):
+        """断开该会话对应的单条 TCP 连接（不影响通道上的其他连接）。"""
+        cid, peer = ckey.rsplit("|", 1)
+        w = self.channels.get(cid)
+        if w is None or peer == "*":
+            return
+        # tcpc 通道固定只有一条连接：断的是最后一条就连通道一起收掉
+        last_one = isinstance(w, TCPClientWorker) and w.conn_keys() == [peer]
+        w.disconnect(peer)
+        if last_one:
+            self._close_channel(cid)
+        self._refresh_contacts()
+        self._log_event(f"--- 连接已断开 {peer} ---")
+
+    def _reconnect_peer(self, ckey: str):
+        """TCP Client 会话断线后重新拨号。"""
+        _cid, peer = ckey.rsplit("|", 1)
+        host, port = peer.rsplit(":", 1)
+        new_key = self._connect_tcp_client(host, int(port))
+        if new_key:
+            self._select_convo(new_key)
 
     def _reopen_channel(self, cid: str):
         """重开已关闭的通道：UDP/TCP 监听按原地址绑定，TCP 连接重新拨号。"""
@@ -1076,6 +1146,13 @@ class NetTesterGUI:
             line2 = "TCP 连接"           # TCP Client 本地是临时端口，不显示
         if cid not in self.channels:
             line2 += " · 已关闭"
+        elif peer != "*" and proto in ("tcps", "tcpc"):
+            # 通道还在但该连接已断（对方主动断开/被「断开此连接」踢掉）
+            w = self.channels[cid]
+            alive = peer in (w.client_keys() if proto == "tcps"
+                             else w.conn_keys())
+            if not alive:
+                line2 += " · 已断开"
         return line1, line2
 
     def _fit_card_width(self):
@@ -1286,6 +1363,7 @@ class NetTesterGUI:
                 else:
                     self.status_var.set(a)
                     appends.append(("sys", f"* [{self._cid_tag(cid)}] {a}"))
+                    contacts_dirty = True   # 连接断开/接入等事件影响卡片标注
         except queue.Empty:
             pass
         if contacts_dirty:

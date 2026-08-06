@@ -137,6 +137,23 @@ def test_tcp():
         lambda: sum(len(p) for _, p in srv_c.data if set(p) == {122}) >= 1024 * 1024
         or b"".join(p for _, p in srv_c.data).count(b"z" * 100) > 0, timeout=5))
 
+    # 单连接断开：server 踢掉该客户端，client 侧应收到 FIN（recv 返回空）
+    srv.disconnect(srv.client_keys()[0])
+    check("server 断开单连接后列表清空",
+          wait_for(lambda: len(srv.client_keys()) == 0))
+    check("client 侧感知断开",
+          wait_for(lambda: len(cli.conn_keys()) == 0))
+
+    # client 单连接断开：重连一个再断
+    key2 = cli.connect("127.0.0.1", port)
+    check("重连后 server 看到客户端",
+          wait_for(lambda: len(srv.client_keys()) == 1))
+    cli.disconnect(key2)
+    check("client 断开单连接后列表清空",
+          wait_for(lambda: len(cli.conn_keys()) == 0))
+    check("server 侧感知断开",
+          wait_for(lambda: len(srv.client_keys()) == 0))
+
     cli.stop()
     srv.stop()
 

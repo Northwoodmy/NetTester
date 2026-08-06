@@ -252,6 +252,14 @@ def phase6():
     gui._reopen_channel(tcp_cid)
     assert tcp_cid in gui.channels, "重开 TCP 连接失败"
     assert gui.current_peer == TCP_CKEY, "TCP 重连后应选中该会话"
+    # 断开此连接：tcpc 唯一连接断开 = 通道一并关闭，卡片标注已关闭
+    gui._disconnect_peer(TCP_CKEY)
+    assert tcp_cid not in gui.channels, "唯一连接断开后通道应一并关闭"
+    assert "已关闭" in gui._card_lines(TCP_CKEY)[1], "断开后卡片应标注已关闭"
+    # 重新连接恢复
+    gui._reconnect_peer(TCP_CKEY)
+    assert tcp_cid in gui.channels and gui.current_peer == TCP_CKEY, \
+        "重新连接失败"
     gui._close_all_channels()
     root.destroy()
     print("GUI 冒烟测试通过（对话框/多通道/多协议/群发/忽略本机/删除会话）")
