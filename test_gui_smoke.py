@@ -4,7 +4,8 @@
 
 流程：对话框开合 -> UDP 建会话自发自收 -> 逗号分隔多目标 -> 通道内群发 ->
 忽略本机来源 -> 第二个 UDP 通道（不同端口）-> TCP Client 会话并存 ->
-关闭全部（已关闭标注 + 删除会话记录）-> 重开恢复 -> 同目标并行 TCP 客户端。
+关闭全部（已关闭标注 + 删除会话记录）-> 重开恢复 -> 同目标并行 TCP 客户端
+-> TCP Server 多客户端显示配置独立。
 """
 
 import os
@@ -351,9 +352,61 @@ def phase7():
     gui._reconnect_peer(ckey2)
     assert cid2 in gui.channels and gui.current_peer == ckey2, "#2 重连失败"
     gui._close_all_channels()
+    # —— TCP Server 模式：同一通道下多个客户端会话的显示配置同样独立 ——
+    assert gui._create_session("tcps", "127.0.0.1", "19097"), "TCPS 通道创建失败"
+    c1 = socket.create_connection(("127.0.0.1", 19097), timeout=3)
+    c2 = socket.create_connection(("127.0.0.1", 19097), timeout=3)
+    c1.sendall(b"from-c1")
+    c2.sendall(b"from-c2")
+    root.after(600, lambda: phase8(c1, c2))
+
+
+def phase8(c1, c2):
+    cid = "tcps:127.0.0.1:19097"
+    k1 = f"{cid}|{c1.getsockname()[0]}:{c1.getsockname()[1]}"
+    k2 = f"{cid}|{c2.getsockname()[0]}:{c2.getsockname()[1]}"
+    assert k1 in gui._convos and k2 in gui._convos, "两个客户端会话都应建立"
+    assert gui._disp_opts[k1] == gui._disp_opts[k2] == (False, True), \
+        "TCPS 新会话应为默认显示配置"
+    # 客户端 1 的会话开 HEX
+    gui._select_convo(k1)
+    gui.rx_hex_var.set(True)
+    gui._rerender()
+    assert gui._disp_opts[k1] == (True, True)
+    assert "66 72 6F 6D" in gui.rx_text.get("1.0", tk.END), "k1 历史应按 HEX 重画"
+    # 客户端 2 不受影响：仍是默认文本
+    gui._select_convo(k2)
+    assert gui.rx_hex_var.get() is False and gui._disp_opts[k2] == (False, True)
+    assert "from-c2" in gui.rx_text.get("1.0", tk.END)
+    # 边缘场景：客户端 3 接入但不发数据——卡片来自 client_keys()，不经过
+    # _ensure_convo；选中应显示默认配置，拨动后独立存在，首条数据不覆盖
+    c3 = socket.create_connection(("127.0.0.1", 19097), timeout=3)
+    root.after(500, lambda: phase8b(c1, c2, c3))
+
+
+def phase8b(c1, c2, c3):
+    cid = "tcps:127.0.0.1:19097"
+    k3 = f"{cid}|{c3.getsockname()[0]}:{c3.getsockname()[1]}"
+    assert k3 in gui._all_convo_keys(), "未发数据的客户端也应有卡片"
+    gui._select_convo(k3)
+    assert gui.rx_hex_var.get() is False, "未配置的卡片应显示默认配置"
+    gui.rx_hex_var.set(True)
+    gui._rerender()
+    assert gui._disp_opts[k3] == (True, True), "未收数据的会话也应能独立配置"
+    c3.sendall(b"from-c3")
+    root.after(500, lambda: phase8c(c1, c2, c3, k3))
+
+
+def phase8c(c1, c2, c3, k3):
+    assert gui._disp_opts[k3] == (True, True), "首条数据不应覆盖已有配置"
+    gui._select_convo(k3)
+    assert gui.rx_hex_var.get() is True
+    for c in (c1, c2, c3):
+        c.close()
+    gui._close_all_channels()
     root.destroy()
     print("GUI 冒烟测试通过（对话框/多通道/多协议/群发/忽略本机/删除会话"
-          "/并行TCP客户端/每会话显示配置）")
+          "/并行TCP客户端/每会话显示配置/TCPS多客户端配置独立）")
 
 
 root.after(1500, phase2)
