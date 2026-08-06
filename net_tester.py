@@ -425,6 +425,8 @@ PALETTE = {
 }
 WINDOW_ALPHA = 1.0               # 浅色主题不用半透明
 
+_THEME_IMAGES = []               # 自绘控件图像（滚动条/复选框），防 GC
+
 
 def _win_glass(root):
     """Windows 11 毛玻璃：Mica 背景（跟随系统明暗）。"""
@@ -517,23 +519,64 @@ def apply_modern_theme(root):
     root.option_add("*TCombobox*Listbox.highlightThickness", 0)
     root.option_add("*TCombobox*Listbox.relief", "flat")
     root.option_add("*TCombobox*Listbox.activeStyle", "none")
-    # 复选框：Material 蓝底白勾（Tk 8.6 clam 只认 indicatorbackground /
-    # indicatorforeground / upper/lowerbordercolor，不认 indicatorcolor）
-    s.configure("TCheckbutton", background=p["bg"], foreground=p["fg"],
-                indicatorsize=16,
-                indicatorbackground="#FFFFFF", indicatorforeground="#FFFFFF",
-                upperbordercolor=p["border"], lowerbordercolor=p["border"],
-                indicatormargin=(0, 6, 0, 0))
-    s.map("TCheckbutton",
-          background=[("active", p["bg"])],
-          indicatorbackground=[("pressed", p["accent_press"]),
-                               ("selected", p["accent"]),
-                               ("active", "#E8F0FE"),
-                               ("!selected", "#FFFFFF")],
-          upperbordercolor=[("selected", p["accent"]), ("active", p["subtle"]),
-                            ("!selected", p["border"])],
-          lowerbordercolor=[("selected", p["accent"]), ("active", p["subtle"]),
-                            ("!selected", p["border"])])
+    # 复选框：自绘 14px 圆角小方框（与 10pt 字号匹配）——
+    # 未选=灰框白底，悬停=蓝框，选中=蓝底白勾，禁用=浅灰
+    def _chk_rrect(img, x0, y0, x1, y1, r, color):
+        for y in range(y0, y1):
+            for x in range(x0, x1):
+                dx = max(0, (x0 + r - x) if x < x0 + r else (x - (x1 - 1 - r)))
+                dy = max(0, (y0 + r - y) if y < y0 + r else (y - (y1 - 1 - r)))
+                if dx * dx + dy * dy <= r * r + 1:
+                    img.put(color, to=(x, y))
+
+    def _chk_seg_d2(px, py, ax, ay, bx, by):
+        vx, vy, wx, wy = bx - ax, by - ay, px - ax, py - ay
+        c1 = vx * wx + vy * vy
+        if c1 <= 0:
+            return (px - ax) ** 2 + (py - ay) ** 2
+        c2 = vx * vx + vy * vy
+        if c2 <= c1:
+            return (px - bx) ** 2 + (py - by) ** 2
+        t = c1 / c2
+        return (px - (ax + t * vx)) ** 2 + (py - (ay + t * vy)) ** 2
+
+    _CHK_ARMS = (((3.8, 7.4), (6.0, 9.8)), ((6.0, 9.8), (10.4, 3.8)))
+
+    def _chk_img(selected, outline, interior=None):
+        """14x14 复选框图：interior 非空=描边+填充底，否则实心底；selected 加白勾。"""
+        img = tk.PhotoImage(width=14, height=14)
+        if interior:
+            _chk_rrect(img, 0, 0, 14, 14, 3, outline)
+            _chk_rrect(img, 2, 2, 12, 12, 2, interior)
+        else:
+            _chk_rrect(img, 0, 0, 14, 14, 3, outline)
+        if selected:
+            for y in range(14):
+                for x in range(14):
+                    d = min(_chk_seg_d2(x + .5, y + .5, *a, *b)
+                            for a, b in _CHK_ARMS)
+                    if d <= 0.85:
+                        img.put("#FFFFFF", to=(x, y))
+        _THEME_IMAGES.append(img)
+        return img
+
+    s.element_create("Chk.indicator", "image",
+                     _chk_img(False, p["disabled_fg"], "#FFFFFF"),
+                     ("active", _chk_img(False, p["accent"], "#FFFFFF")),
+                     ("selected", _chk_img(True, p["accent"])),
+                     ("selected active", _chk_img(True, p["accent_hi"])),
+                     ("disabled", _chk_img(False, p["border"], p["disabled_bg"])),
+                     ("selected disabled", _chk_img(True, p["border"])))
+    s.layout("TCheckbutton", [
+        ("Checkbutton.padding", {"sticky": "nswe", "children": [
+            ("Chk.indicator", {"side": "left", "sticky": ""}),
+            ("Checkbutton.spacing", {"side": "left"}),
+            ("Checkbutton.focus", {"side": "left", "sticky": "nswe",
+                                   "children": [
+                                       ("Checkbutton.label",
+                                        {"sticky": "nswe"})]})]})])
+    s.configure("TCheckbutton", background=p["bg"], foreground=p["fg"])
+    s.map("TCheckbutton", background=[("active", p["bg"])])
     s.configure("TSeparator", background=p["border"])
     s.configure("Vertical.TScrollbar", background=p["border"], troughcolor=p["bg"],
                 bordercolor=p["bg"], arrowcolor=p["subtle"], arrowsize=12)
@@ -542,7 +585,8 @@ def apply_modern_theme(root):
     s.configure("Status.TLabel", background=p["surface"], foreground=p["subtle"])
 
     # —— 细圆角滚动条：图像元素自绘，12px 无箭头，滑块悬停/按下变色 ——
-    _sb_keep = [tk.PhotoImage(width=12, height=4)]     # 全透明滑槽（防 GC）
+    _sb_trough = tk.PhotoImage(width=12, height=4)          # 全透明滑槽
+    _THEME_IMAGES.append(_sb_trough)
 
     def _sb_thumb(color):
         img = tk.PhotoImage(width=12, height=24)       # 圆角滑块，两侧留 2px 透明
@@ -552,10 +596,10 @@ def apply_modern_theme(root):
                 dy = max(0, (4 - y) if y < 4 else (y - 19))
                 if dx * dx + dy * dy <= 17:            # 半径 4 的圆角
                     img.put(color, to=(x, y))
-        _sb_keep.append(img)
+        _THEME_IMAGES.append(img)
         return img
 
-    s.element_create("Slim.trough", "image", _sb_keep[0], sticky="nswe")
+    s.element_create("Slim.trough", "image", _sb_trough, sticky="nswe")
     s.element_create("Slim.thumb", "image", _sb_thumb("#C4C7CB"),
                      ("active", _sb_thumb(p["disabled_fg"])),
                      ("pressed", _sb_thumb("#80868B")),
@@ -563,7 +607,6 @@ def apply_modern_theme(root):
     s.layout("Slim.Vertical.TScrollbar", [
         ("Slim.trough", {"sticky": "nswe", "children": [
             ("Slim.thumb", {"sticky": "nswe"})]})])
-    apply_modern_theme._keep = _sb_keep
 
     # Windows 毛玻璃；Linux/X11 半透明（浅色主题默认关闭）
     if IS_WIN:
