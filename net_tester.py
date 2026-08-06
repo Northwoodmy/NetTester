@@ -544,6 +544,7 @@ class NetTesterGUI:
         # 不同会话可属于不同协议、不同端口的通道。
         self._convos = {}                # ckey -> [(direction, data, time), ...]
         self._convo_keys = []            # 联系人列表行对应的 ckey
+        self._cards = {}                 # ckey -> 卡片 Frame（含 _badge 角标）
         self._unread = {}                # ckey -> 未读条数
         self._cstats = {}                # ckey -> [tx字节, tx包数, rx字节, rx包数]
         self._crate = {}                 # ckey -> [时间, tx字节, rx字节]（速率基线）
@@ -586,21 +587,31 @@ class NetTesterGUI:
         main = ttk.Frame(self.root, padding=6)
         main.pack(fill=tk.BOTH, expand=True)
 
-        # 左栏：会话联系人列表 + 发起新会话按钮（类微信）
-        # 列表宽度按最长条目自适应（_fit_contact_width），无需横向滚动条
+        # 左栏：会话卡片列表 + 发起新会话按钮（类微信）
         contact_col = ttk.Frame(main)
         contact_col.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 6))
-        self.contact_list = tk.Listbox(
-            contact_col, width=22, bg="#FFFFFF", fg=PALETTE["fg"],
-            selectbackground=PALETTE["select"],
-            selectforeground=PALETTE["accent_press"],
-            relief="flat", highlightthickness=1,
-            highlightbackground=PALETTE["border"],
-            highlightcolor=PALETTE["border"],   # 焦点不变色：不要蓝色焦点框
-            activestyle="none", exportselection=False)
-        self.contact_list.pack(fill=tk.BOTH, expand=True)
-        self.contact_list.bind("<<ListboxSelect>>", self._on_contact_pick)
-        self.contact_list.bind("<Button-3>", self._on_contact_menu)
+        # Canvas + 内嵌 Frame 实现可滚动的卡片列
+        self.contact_canvas = tk.Canvas(contact_col, width=180,
+                                        bg=PALETTE["surface"],
+                                        highlightthickness=0)
+        cards_scroll = ttk.Scrollbar(contact_col, orient=tk.VERTICAL,
+                                     command=self.contact_canvas.yview)
+        self.contact_canvas.configure(yscrollcommand=cards_scroll.set)
+        cards_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.contact_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.cards_frame = tk.Frame(self.contact_canvas, bg=PALETTE["surface"])
+        self._cards_window = self.contact_canvas.create_window(
+            (0, 0), window=self.cards_frame, anchor=tk.NW)
+        self.cards_frame.bind("<Configure>", lambda _e: self.contact_canvas.configure(
+            scrollregion=self.contact_canvas.bbox("all")))
+        self.contact_canvas.bind("<Configure>", lambda e: self.contact_canvas.itemconfigure(
+            self._cards_window, width=e.width))
+        # 卡片字体（测量与绘制共用，避免反复创建命名字体）
+        self._f_card1 = tkfont.Font(family=self._ui_font, size=10, weight="bold")
+        self._f_card2 = tkfont.Font(family=self._ui_font, size=8)
+        self._f_badge = tkfont.Font(family=self._ui_font, size=8, weight="bold")
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.contact_canvas.bind(seq, self._on_cards_wheel)
         ttk.Button(contact_col, text="＋ 发起新会话", style="Accent.TButton",
                    command=self._show_new_session_dialog).pack(fill=tk.X,
                                                                pady=(4, 0))
@@ -884,12 +895,8 @@ class NetTesterGUI:
 
     # ---------------- 联系人右键菜单 ----------------
 
-    def _on_contact_menu(self, event):
-        """右键联系人：关闭所在通道 / 删除会话记录。"""
-        idx = self.contact_list.nearest(event.y)
-        if idx < 0 or idx >= len(self._convo_keys):
-            return
-        ckey = self._convo_keys[idx]
+    def _on_contact_menu(self, ckey: str, event):
+        """右键会话卡片：关闭所在通道 / 删除会话记录。"""
         self._select_convo(ckey)
         cid = self._chan_of(ckey)
         menu = tk.Menu(self.root, tearoff=0)
@@ -1023,46 +1030,107 @@ class NetTesterGUI:
                 keys.append(k)
         return keys
 
-    def _fit_contact_width(self):
-        """联系人列表宽度按最长条目自适应：用列表字体实测像素宽，
-        换算成字符宽度，夹在 [22, 60] 之间。"""
-        f = tkfont.Font(font=self.contact_list.cget("font"))
-        unit = f.measure("0") or 7
+    def _card_lines(self, ckey: str):
+        """卡片两行文本：第一行对端地址，第二行本机通道说明。"""
+        cid, peer = ckey.rsplit("|", 1)
+        proto, _h, p = cid.split(":", 2)
+        line1 = "（群发）" if peer == "*" else peer
+        if proto == "udp":
+            line2 = f"本机 UDP·{p}"
+        elif proto == "tcps":
+            line2 = f"本机 TCP 监听·{p}"
+        else:
+            line2 = "TCP 连接"           # TCP Client 本地是临时端口，不显示
+        if cid not in self.channels:
+            line2 += " · 已关闭"
+        return line1, line2
+
+    def _fit_card_width(self):
+        """卡片列宽度按最长内容自适应（实测两行文本像素宽）。"""
         widest = 0
-        for i in range(self.contact_list.size()):
-            widest = max(widest, f.measure(self.contact_list.get(i)))
-        chars = max(22, min(60, widest // unit + 2))
-        if chars != int(self.contact_list.cget("width")):
-            self.contact_list.config(width=chars)
+        for k in self._convo_keys:
+            l1, l2 = self._card_lines(k)
+            badge_px = 34 if self._unread.get(k) else 0
+            widest = max(widest, self._f_card1.measure(l1) + badge_px,
+                         self._f_card2.measure(l2))
+        width = max(180, min(340, widest + 16 + 10))  # 卡片内边距 + 栏内边距
+        if width != int(self.contact_canvas.cget("width")):
+            self.contact_canvas.config(width=width)
 
     def _refresh_contacts(self):
-        """重建联系人列表，保持当前选中态，并同步聊天区标题。"""
+        """重建会话卡片，并同步聊天区标题。"""
         keys = self._all_convo_keys()
         self._convo_keys = keys
-        self.contact_list.delete(0, tk.END)
+        for w in self.cards_frame.winfo_children():
+            w.destroy()
+        self._cards = {}
         for k in keys:
-            n = self._unread.get(k, 0)
-            disp = self._display(k)
-            self.contact_list.insert(tk.END, f"{disp}  [{n}]" if n else disp)
-        self._fit_contact_width()
+            self._cards[k] = self._build_card(k)
+        self._fit_card_width()
         if self.current_peer in keys:
-            idx = keys.index(self.current_peer)
-            self.contact_list.selection_set(idx)
-            self.contact_list.see(idx)
             self.convo_title.config(text=self._display(self.current_peer))
         else:
             self.convo_title.config(text="未选择会话（点击 ＋发起新会话 开始）")
+
+    def _build_card(self, ckey: str) -> tk.Frame:
+        """一张会话卡片：第一行对端地址+红色未读角标，第二行本机通道。"""
+        line1, line2 = self._card_lines(ckey)
+        selected = ckey == self.current_peer
+        closed = self._chan_of(ckey) not in self.channels
+        bg = PALETTE["select"] if selected else "#FFFFFF"
+        fg = PALETTE["subtle"] if closed else PALETTE["fg"]
+        sub_fg = PALETTE["disabled_fg"] if closed else PALETTE["subtle"]
+
+        card = tk.Frame(self.cards_frame, bg=bg, cursor="hand2",
+                        highlightthickness=1,
+                        highlightbackground=PALETTE["border"],
+                        highlightcolor=PALETTE["border"])
+        card.pack(fill=tk.X, padx=6, pady=3)
+        top = tk.Frame(card, bg=bg)
+        top.pack(fill=tk.X, padx=8, pady=(6, 0))
+        l1 = tk.Label(top, text=line1, bg=bg, fg=fg, anchor=tk.W,
+                      font=self._f_card1)
+        l1.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        n = self._unread.get(ckey, 0)
+        badge = tk.Label(top, text=str(n if n <= 99 else "99+"),
+                         bg="#D93025", fg="#FFFFFF", font=self._f_badge,
+                         padx=5, pady=1)
+        if n:
+            badge.pack(side=tk.RIGHT)       # 未读为 0 时角标隐藏
+        l2 = tk.Label(card, text=line2, bg=bg, fg=sub_fg, anchor=tk.W,
+                      font=self._f_card2)
+        l2.pack(fill=tk.X, padx=8, pady=(0, 6))
+
+        card._selected = selected
+        card._badge = badge                 # 测试与悬停重绘用
+        card._paintables = (card, top, l1, l2)
+        for w in (card, top, l1, l2, badge):
+            w.bind("<Button-1>", lambda _e, k=ckey: self._select_convo(k))
+            w.bind("<Button-3>", lambda e, k=ckey: self._on_contact_menu(k, e))
+            w.bind("<Enter>", lambda _e, c=card: self._card_hover(c, True))
+            w.bind("<Leave>", lambda _e, c=card: self._card_hover(c, False))
+            w.bind("<MouseWheel>", self._on_cards_wheel)     # Win/macOS
+            w.bind("<Button-4>", self._on_cards_wheel)       # X11 上滚
+            w.bind("<Button-5>", self._on_cards_wheel)       # X11 下滚
+        return card
+
+    def _card_paint(self, card, bg: str):
+        for w in card._paintables:
+            w.config(bg=bg)
+
+    def _card_hover(self, card, on: bool):
+        if not card._selected:
+            self._card_paint(card, PALETTE["surface"] if on else "#FFFFFF")
+
+    def _on_cards_wheel(self, event):
+        """卡片区滚轮：X11 用 Button-4/5，Windows/macOS 用 MouseWheel delta。"""
+        up = getattr(event, "num", None) == 4 or getattr(event, "delta", 0) > 0
+        self.contact_canvas.yview_scroll(-1 if up else 1, "units")
 
     def _ensure_convo(self, ckey: str) -> bool:
         is_new = ckey not in self._convos
         self._convos.setdefault(ckey, [])
         return is_new
-
-    def _on_contact_pick(self, _event=None):
-        sel = self.contact_list.curselection()
-        if not sel or sel[0] >= len(self._convo_keys):
-            return
-        self._select_convo(self._convo_keys[sel[0]])
 
     def _select_convo(self, peer: str):
         old = self.current_peer
@@ -1121,6 +1189,7 @@ class NetTesterGUI:
 
     def _poll_queue(self):
         appends = []                   # 批量渲染，每 50ms 只刷一次，抗高包速
+        contacts_dirty = False         # 卡片重建较重，本批结束后只刷一次
         try:
             while True:
                 kind, cid, a, b = self.msg_queue.get_nowait()
@@ -1135,7 +1204,7 @@ class NetTesterGUI:
                     st[2] += len(b)
                     st[3] += 1
                     if self._ensure_convo(ckey):
-                        self._refresh_contacts()
+                        contacts_dirty = True
                     self._store_msg(ckey, "rx", b)
                     if self.current_peer is None:
                         self._select_convo(ckey)   # 第一个会话自动选中
@@ -1144,12 +1213,14 @@ class NetTesterGUI:
                             appends.append(("msg", "rx", ckey, b, time.time()))
                     else:
                         self._unread[ckey] = self._unread.get(ckey, 0) + 1
-                        self._refresh_contacts()
+                        contacts_dirty = True
                 else:
                     self.status_var.set(a)
                     appends.append(("sys", f"* [{self._cid_tag(cid)}] {a}"))
         except queue.Empty:
             pass
+        if contacts_dirty:
+            self._refresh_contacts()
         if appends:
             self._append_msgs(appends)
         keys = tuple(self._all_convo_keys())       # 连接接入/断开/通道变化

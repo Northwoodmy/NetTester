@@ -88,12 +88,11 @@ def phase2():
     assert gui.rx_pkts >= 3, f"应至少收到 3 包，实际 {gui.rx_pkts}"
     assert PEER in gui._convo_keys, f"联系人列表未更新: {gui._convo_keys}"
     assert gui.convo_title.cget("text") == gui._display(PEER), "标题未同步"
-    # 点选联系人 -> 切换当前会话
-    idx = gui._convo_keys.index(PEER)
-    gui.contact_list.selection_clear(0, tk.END)
-    gui.contact_list.selection_set(idx)
-    gui._on_contact_pick()
-    assert gui.current_peer == PEER, "点选联系人未切换会话"
+    # 点击卡片 -> 切换当前会话；卡片两行文本 = 对端地址 / 本机通道
+    gui._cards[PEER].event_generate("<Button-1>")
+    assert gui.current_peer == PEER, "点击卡片未切换会话"
+    assert gui._card_lines(PEER) == ("127.0.0.1:19099", "本机 UDP·19099"), \
+        f"卡片文本不正确: {gui._card_lines(PEER)}"
     # 会话里应同时有 rx 和 tx 气泡记录
     dirs = [m[0] for m in gui._convos[PEER]]
     assert dirs.count("rx") >= 3 and "tx" in dirs, f"会话消息记录不完整: {dirs}"
@@ -208,12 +207,18 @@ def phase5c():
     assert gui._cstats[PEER][1] >= 3, \
         f"循环包应发往锁定的 PEER: {gui._cstats[PEER]}"
     assert gui._cstats[TCP_CKEY][1] == TCP_TX0, "切走后 TCP 会话不应收到循环包"
+    # 循环期间当前是 TCP 会话，PEER 的未读应显示在红色角标上
+    # （用 winfo_manager 而非 winfo_ismapped：刚重建的卡片要等下一轮事件循环才绘制）
+    badge = gui._cards[PEER]._badge
+    assert badge.winfo_manager() == "pack" and int(badge.cget("text")) >= 3, \
+        "PEER 的未读角标未显示"
     root.after(250, phase5d)        # 等在途 loopback 包落地再清零
 
 
 def phase5d():
-    # 切回 UDP 会话，第一个通道仍能自发自收
+    # 切回 UDP 会话，第一个通道仍能自发自收；选中后未读清零、角标隐藏
     gui._select_convo(PEER)
+    assert gui._cards[PEER]._badge.winfo_manager() != "pack", "选中会话后角标应隐藏"
     gui._reset_stats()
     root.after(200, lambda: gui._send(random_pkt=True))
     root.after(700, phase6)
