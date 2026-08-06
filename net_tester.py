@@ -13,6 +13,7 @@ net_tester.py — TCP/UDP 网络测试工具（GUI）
 """
 
 import errno
+import ctypes
 import os
 import queue
 import re
@@ -626,6 +627,199 @@ TEXT_STYLE = dict(bg="#FFFFFF", fg="#202124", insertbackground="#202124",
 
 
 # ---------------------------------------------------------------------------
+# 无边框窗口：平台去装饰 + 原生拖动/缩放
+# ---------------------------------------------------------------------------
+# Linux(X11/XWayland)：_MOTIF_WM_HINTS decorations=0 去框，窗口仍归 WM 管理
+# （任务栏/Alt-Tab/最小化都正常——不能用 overrideredirect，那是 unmanaged
+# 窗口，会丢任务栏和 Alt-Tab）；拖动与八向缩放通过 _NET_WM_MOVERESIZE
+# ClientMessage 交给 WM 原生执行（GTK CSD 应用在 X11 上的同款做法），
+# 手感与系统窗口一致、无闪烁。
+# Windows：SetWindowLongPtr 去掉 WS_CAPTION/WS_SYSMENU、保留
+# WS_THICKFRAME —— 无边框但原生可缩放，任务栏/Aero Snap 正常。
+# 所有平台调用都 try/except 兜底：失败则保留系统标题栏，仅外观差异。
+
+_X11 = None                            # libX11 ctypes 句柄缓存
+_X11_DPY = None                        # 自有 Display 连接缓存
+
+
+def _x11_lib():
+    """加载 libX11 并打开一根自有连接（与 Tk 的连接互不干扰）。"""
+    global _X11, _X11_DPY
+    if _X11 is None:
+        lib = ctypes.CDLL("libX11.so.6")
+        lib.XOpenDisplay.restype = ctypes.c_void_p
+        lib.XDefaultRootWindow.restype = ctypes.c_ulong
+        lib.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+        lib.XInternAtom.restype = ctypes.c_ulong
+        lib.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
+                                    ctypes.c_int]
+        lib.XChangeProperty.argtypes = [ctypes.c_void_p, ctypes.c_ulong,
+                                        ctypes.c_ulong, ctypes.c_ulong,
+                                        ctypes.c_int, ctypes.c_int,
+                                        ctypes.c_void_p, ctypes.c_int]
+        lib.XSendEvent.argtypes = [ctypes.c_void_p, ctypes.c_ulong,
+                                   ctypes.c_int, ctypes.c_long,
+                                   ctypes.c_void_p]
+        lib.XFlush.argtypes = [ctypes.c_void_p]
+        lib.XFree.argtypes = [ctypes.c_void_p]
+        lib.XQueryTree.argtypes = [ctypes.c_void_p, ctypes.c_ulong,
+                                   ctypes.c_void_p, ctypes.c_void_p,
+                                   ctypes.c_void_p, ctypes.c_void_p]
+        _X11 = lib
+    if _X11_DPY is None:
+        _X11_DPY = _X11.XOpenDisplay(None)
+        if not _X11_DPY:
+            raise OSError("XOpenDisplay 失败")
+    return _X11, _X11_DPY
+
+
+def _x11_frame_id(root) -> int:
+    """返回被 WM 管理的那个窗口的 XID。Tk 顶层在 X11 上有一层包装窗口：
+    winfo_id() 是内层内容窗口（hints 设这里没用），wm_frame() 又越过了
+    包装层、直接指向 WM 的 frame 窗口（mutter 自己的窗口，设了白设）——
+    正确目标是 winfo_id 的父窗口（XQueryTree）。无包装层时退回内层。"""
+    X, dpy = _x11_lib()
+    inner = root.winfo_id()
+    rootw = ctypes.c_ulong()
+    parent = ctypes.c_ulong()
+    children = ctypes.c_void_p()
+    n = ctypes.c_uint()
+    X.XQueryTree(ctypes.c_void_p(dpy), ctypes.c_ulong(inner),
+                 ctypes.byref(rootw), ctypes.byref(parent),
+                 ctypes.byref(children), ctypes.byref(n))
+    if children.value:
+        X.XFree(children)
+    if parent.value and parent.value != rootw.value:
+        return parent.value
+    return inner
+
+
+def _x11_set_no_decorations(root):
+    """_MOTIF_WM_HINTS decorations=0：去掉标题栏/边框，窗口仍被 WM 管理。"""
+    X, dpy = _x11_lib()
+    atom = X.XInternAtom(dpy, b"_MOTIF_WM_HINTS", 0)
+    hints = (ctypes.c_ulong * 5)(2, 0, 0, 0, 0)   # flags=DECORATIONS, decorations=0
+    X.XChangeProperty(dpy, _x11_frame_id(root), atom, atom, 32, 0,
+                      ctypes.cast(hints, ctypes.c_void_p), 5)
+    X.XFlush(dpy)
+
+
+class _XClientMessageData(ctypes.Union):
+    _fields_ = [("b", ctypes.c_char * 20),
+                ("s", ctypes.c_short * 10),
+                ("l", ctypes.c_long * 5)]
+
+
+class _XClientMessageEvent(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_int),
+                ("serial", ctypes.c_ulong),
+                ("send_event", ctypes.c_int),
+                ("display", ctypes.c_void_p),
+                ("window", ctypes.c_ulong),
+                ("message_type", ctypes.c_ulong),
+                ("format", ctypes.c_int),
+                ("data", _XClientMessageData)]
+
+
+class _XEvent(ctypes.Union):
+    _fields_ = [("type", ctypes.c_int),
+                ("xclient", _XClientMessageEvent),
+                ("pad", ctypes.c_long * 24)]
+
+
+def _x11_wm_moveresize(root, x_root, y_root, direction):
+    """让 WM 原生执行交互式拖动/缩放。direction: 8=移动，0-7=八向缩放
+    （0 左上 1 上 2 右上 3 右 4 右下 5 下 6 左下 7 左）。须在按钮按住时调用。"""
+    X, dpy = _x11_lib()
+    ev = _XEvent()
+    c = ev.xclient
+    c.type = 33                                          # ClientMessage
+    c.display = dpy
+    c.window = _x11_frame_id(root)
+    c.message_type = X.XInternAtom(dpy, b"_NET_WM_MOVERESIZE", 0)
+    c.format = 32
+    c.data.l[0] = x_root
+    c.data.l[1] = y_root
+    c.data.l[2] = direction
+    c.data.l[3] = 1                                      # button 1
+    c.data.l[4] = 1                                      # source: application
+    # SubstructureRedirectMask | SubstructureNotifyMask（EWMH 规定发到根窗口）
+    X.XSendEvent(dpy, X.XDefaultRootWindow(dpy), 0,
+                 (1 << 20) | (1 << 19), ctypes.byref(ev))
+    X.XFlush(dpy)
+
+
+def _win32_native_borderless(root):
+    """去 WS_CAPTION/WS_SYSMENU/WS_BORDER、留 WS_THICKFRAME：无边框 +
+    原生缩放进热区 + 任务栏 + Aero Snap。代价：保留 1px 细边框。"""
+    u32 = ctypes.windll.user32
+    hwnd = int(root.wm_frame(), 16)
+    if ctypes.sizeof(ctypes.c_void_p) == 8:
+        get_style = u32.GetWindowLongPtrW
+        set_style = u32.SetWindowLongPtrW
+    else:
+        get_style = u32.GetWindowLongW
+        set_style = u32.SetWindowLongW
+    get_style.restype = ctypes.c_ssize_t
+    get_style.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    set_style.restype = ctypes.c_ssize_t
+    set_style.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_ssize_t]
+    GWL_STYLE = -16
+    style = get_style(hwnd, GWL_STYLE)
+    style &= ~(0x00C00000 | 0x00080000 | 0x00800000)  # CAPTION|SYSMENU|BORDER
+    style |= 0x00040000                               # WS_THICKFRAME
+    set_style(hwnd, GWL_STYLE, style)
+    u32.SetWindowPos(ctypes.c_void_p(hwnd), 0, 0, 0, 0, 0,
+                     0x0001 | 0x0002 | 0x0004 | 0x0020)  # NOSIZE|NOMOVE|NOZORDER|FRAMECHANGED
+
+
+def _seg_d2(px, py, ax, ay, bx, by):
+    """点 (px,py) 到线段 (ax,ay)-(bx,by) 的距离平方（自绘图标用）。"""
+    vx, vy, wx, wy = bx - ax, by - ay, px - ax, py - ay
+    c1 = vx * wx + vy * wy
+    if c1 <= 0:
+        return (px - ax) ** 2 + (py - ay) ** 2
+    c2 = vx * vx + vy * vy
+    if c2 <= c1:
+        return (px - bx) ** 2 + (py - by) ** 2
+    t = c1 / c2
+    return (px - (ax + t * vx)) ** 2 + (py - (ay + t * vy)) ** 2
+
+
+def _tb_icon(kind: str, color: str) -> "tk.PhotoImage":
+    """12x12 标题栏按钮图标：min=横线，max=方框，restore=错位双方框，
+    close=叉。线段扫描线光栅化，1.2px 笔宽，跨平台字形一致。"""
+    img = tk.PhotoImage(width=12, height=12)
+    W2 = 0.36                       # 距离平方阈值 ≈ 1.2px 线宽
+    if kind == "restore":
+        for y in range(12):
+            for x in range(12):
+                px, py = x + .5, y + .5
+                front = 1.5 <= px <= 8.5 and 4.0 <= py <= 10.5
+                front_edge = front and \
+                    (px < 2.7 or px > 7.3 or py < 5.2 or py > 9.3)
+                back = 3.5 <= px <= 10.5 and 1.5 <= py <= 8.5
+                back_edge = back and \
+                    (px < 4.7 or px > 9.3 or py < 2.7 or py > 7.3)
+                if front_edge or (back_edge and not front):
+                    img.put(color, to=(x, y))
+    else:
+        strokes = {
+            "min":   [((2.5, 6.0), (9.5, 6.0))],
+            "max":   [((2.5, 2.5), (9.5, 2.5)), ((9.5, 2.5), (9.5, 9.5)),
+                      ((9.5, 9.5), (2.5, 9.5)), ((2.5, 9.5), (2.5, 2.5))],
+            "close": [((3.0, 3.0), (9.0, 9.0)), ((9.0, 3.0), (3.0, 9.0))],
+        }[kind]
+        for y in range(12):
+            for x in range(12):
+                if min(_seg_d2(x + .5, y + .5, *a, *b)
+                       for a, b in strokes) <= W2:
+                    img.put(color, to=(x, y))
+    _THEME_IMAGES.append(img)
+    return img
+
+
+# ---------------------------------------------------------------------------
 # GUI 层
 # ---------------------------------------------------------------------------
 
@@ -633,6 +827,8 @@ class NetTesterGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title("TCP/UDP 网络测试工具")
+        root.withdraw()              # 先藏：无边框改造完成后才出场，避免闪框
+        self._borderless = False     # 去装饰是否成功（失败则隐藏自定义标题栏）
 
         self.channels = {}               # 通道 cid -> worker；cid = 协议:地址:端口
         self.msg_queue: queue.Queue = queue.Queue()
@@ -667,6 +863,16 @@ class NetTesterGUI:
         root.geometry(f"{max(940, root.winfo_reqwidth())}x"
                       f"{max(600, root.winfo_reqheight())}")
         root.minsize(820, 480)
+        self._make_borderless()
+        root.deiconify()
+        if not IS_WIN and self._borderless:
+            # 两个坑：1) Tk 在映射前后会重写 _MOTIF_WM_HINTS，pre-map
+            # 设置会被覆写/打到未创建的窗口上（BadWindow，Xlib 默认错误
+            # 处理器会杀进程）；2) 顶层窗口自身的 <Map> 事件不会触发
+            # 绑定（Tk 内部消化了 MapNotify）。所以映射后用几次延时
+            # 重断言盖住 Tk 的全部覆写时机；mutter 支持动态去装饰。
+            for delay in (150, 500, 1500):
+                root.after(delay, self._assert_no_decorations)
         self._poll_queue()
         self._update_stats()
         root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -676,14 +882,28 @@ class NetTesterGUI:
     def _build_ui(self):
         self._ui_font = "Segoe UI" if IS_WIN else "Noto Sans CJK SC"
 
+        # Linux 无边框形态需要 4px 边缘热区做八向缩放（Windows 由
+        # WS_THICKFRAME 原生提供）：外层套一圈与标题栏同色的 Frame，
+        # 指针进入这圈环时换 resize 光标，按下转 _NET_WM_MOVERESIZE。
+        container = self.root
+        if not IS_WIN:
+            self._edge = tk.Frame(self.root, bg=PALETTE["surface"],
+                                  bd=4, relief="flat")
+            self._edge.pack(fill=tk.BOTH, expand=True)
+            self._edge.bind("<Motion>", self._edge_motion)
+            self._edge.bind("<Leave>", self._edge_leave)
+            self._edge.bind("<Button-1>", self._edge_press)
+            container = self._edge
+        self._build_titlebar(container)
+
         # 底部状态栏：仅状态文字（统计已并入各会话）
-        status = ttk.Frame(self.root, padding=(8, 3))
+        status = ttk.Frame(container, padding=(8, 3))
         status.pack(fill=tk.X, side=tk.BOTTOM)
         self.status_var = tk.StringVar(value="就绪")
         ttk.Label(status, textvariable=self.status_var, style="Status.TLabel",
                   anchor=tk.W).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        main = ttk.Frame(self.root, padding=6)
+        main = ttk.Frame(container, padding=6)
         main.pack(fill=tk.BOTH, expand=True)
 
         # 左栏：会话卡片列表 + 发起新会话按钮（类微信）
@@ -834,6 +1054,199 @@ class NetTesterGUI:
                         justify=tk.CENTER, spacing1=6)
 
         self._refresh_contacts()
+
+    # ---------------- 自定义标题栏（无边框形态） ----------------
+
+    def _make_borderless(self):
+        """去窗口装饰。任何一步失败都退化为系统标题栏：藏掉自定义栏，
+        功能不受影响，只是外观回到原样。
+        注意 Linux 下这里只验证 X11 可用——_MOTIF_WM_HINTS 必须等窗口
+        映射后才能设（见 __init__ 里的注释）。"""
+        try:
+            if IS_WIN:
+                _win32_native_borderless(self.root)
+            else:
+                _x11_lib()
+            self._borderless = True
+        except Exception:
+            self._titlebar.pack_forget()
+            self._tb_sep.pack_forget()
+
+    def _assert_no_decorations(self):
+        """设置/重申 _MOTIF_WM_HINTS decorations=0（须在窗口映射后调用）。"""
+        try:
+            _x11_set_no_decorations(self.root)
+        except Exception:
+            pass
+
+    def _build_titlebar(self, parent):
+        """浅灰标题栏：左标题，右 最小化/最大化(还原)/关闭（自绘 12px
+        图标，跨平台字形一致）。栏体与标题文字可拖动窗口（Linux 交 WM
+        原生拖动，Windows 手动），双击切换最大化。"""
+        p = PALETTE
+        bar = tk.Frame(parent, bg=p["surface"], height=34)
+        bar.pack(side=tk.TOP, fill=tk.X)
+        bar.pack_propagate(False)
+        self._titlebar = bar
+        self._tb_sep = tk.Frame(parent, bg=p["border"], height=1)
+        self._tb_sep.pack(side=tk.TOP, fill=tk.X)
+
+        self._tb_icons = {
+            "min": _tb_icon("min", p["fg"]),
+            "max": _tb_icon("max", p["fg"]),
+            "restore": _tb_icon("restore", p["fg"]),
+            "close": _tb_icon("close", p["fg"]),
+            "close_hi": _tb_icon("close", "#FFFFFF"),
+        }
+        self._tb_drag_start = None     # Windows 手动拖动起点
+
+        title = tk.Label(bar, text="TCP/UDP 网络测试工具",
+                         bg=p["surface"], fg=p["fg"],
+                         font=(self._ui_font, 9))
+        title.pack(side=tk.LEFT, padx=(10, 0))
+
+        self._tb_close = self._tb_button(bar, "close", self._on_close)
+        self._tb_close.pack(side=tk.RIGHT)
+        self._tb_max = self._tb_button(bar, "max", self._toggle_maximize)
+        self._tb_max.pack(side=tk.RIGHT)
+        self._tb_min = self._tb_button(bar, "min", self.root.iconify)
+        self._tb_min.pack(side=tk.RIGHT)
+
+        for wgt in (bar, title):
+            wgt.bind("<Button-1>", self._tb_press)
+            wgt.bind("<B1-Motion>", self._tb_drag)
+            wgt.bind("<Double-1>", lambda _e: self._toggle_maximize())
+
+    def _tb_button(self, bar, kind, cmd):
+        """40x34 扁平按钮：悬停 min/max 变浅灰、close 变红底白叉。"""
+        p = PALETTE
+        hover = "#E81123" if kind == "close" else "#E0E2E5"
+        lbl = tk.Label(bar, width=40, height=34, bd=0, highlightthickness=0,
+                       bg=p["surface"], image=self._tb_icons[kind])
+
+        def enter(_e):
+            lbl.config(bg=hover)
+            if kind == "close":
+                lbl.config(image=self._tb_icons["close_hi"])
+            elif kind == "max":
+                self._sync_max_icon()   # Super+↑/拖到顶部等外部途径也会改状态
+
+        def leave(_e):
+            lbl.config(bg=p["surface"])
+            if kind == "close":
+                lbl.config(image=self._tb_icons["close"])
+
+        lbl.bind("<Enter>", enter)
+        lbl.bind("<Leave>", leave)
+        lbl.bind("<Button-1>", lambda _e: cmd())
+        return lbl
+
+    def _is_zoomed(self) -> bool:
+        try:
+            if IS_WIN:
+                return self.root.state() == "zoomed"
+            return bool(int(self.root.wm_attributes("-zoomed")))
+        except (tk.TclError, ValueError):
+            return False
+
+    def _sync_max_icon(self):
+        self._tb_max.config(image=self._tb_icons[
+            "restore" if self._is_zoomed() else "max"])
+
+    def _toggle_maximize(self):
+        try:
+            if IS_WIN:
+                self.root.state("normal" if self.root.state() == "zoomed"
+                                else "zoomed")
+            else:
+                self.root.wm_attributes("-zoomed",
+                                        0 if self._is_zoomed() else 1)
+        except tk.TclError:
+            return
+        self._sync_max_icon()
+
+    def _tb_press(self, e):
+        """标题栏按下：Linux 让 WM 从指针位置原生拖动（direction 8=移动，
+        与系统标题栏手感一致）；Windows 记录起点，<B1-Motion> 手动拖。"""
+        if IS_WIN:
+            if self.root.state() == "zoomed":
+                self._tb_drag_start = None      # 最大化时不拖，先点还原
+            else:
+                self._tb_drag_start = (e.x_root, e.y_root,
+                                       self.root.winfo_x(),
+                                       self.root.winfo_y())
+        else:
+            try:
+                _x11_wm_moveresize(self.root, e.x_root, e.y_root, 8)
+            except Exception:
+                pass
+
+    def _tb_drag(self, e):
+        if IS_WIN and self._tb_drag_start:
+            sx, sy, wx, wy = self._tb_drag_start
+            self.root.geometry(f"+{wx + e.x_root - sx}"
+                               f"+{wy + e.y_root - sy}")
+
+    # ---------------- Linux 窗口边缘缩放（4px 热区环） ----------------
+    # _edge 外框的 bd=4 形成一圈同色热区：内部被子控件占满，指针只有
+    # 进入这圈环时事件才落到外框本身，按方位换光标/发起 WM 原生缩放。
+
+    _RESIZE_CURSOR = {
+        (-1, -1): "top_left_corner",   (0, -1): "top_side",
+        (1, -1): "top_right_corner",   (1, 0): "right_side",
+        (1, 1): "bottom_right_corner", (0, 1): "bottom_side",
+        (-1, 1): "bottom_left_corner", (-1, 0): "left_side",
+    }
+    _RESIZE_DIR = {
+        (-1, -1): 0, (0, -1): 1, (1, -1): 2, (1, 0): 3,
+        (1, 1): 4, (0, 1): 5, (-1, 1): 6, (-1, 0): 7,
+    }
+
+    @staticmethod
+    def _edge_dir(x, y, w, h):
+        """按坐标判定缩放方位 (hx,hy)；不在任何边上返回 None。
+        角区沿边延长 14px，提高角落命中率。"""
+        B, C = 4, 14
+        on_l, on_r = x < B, x >= w - B
+        on_t, on_b = y < B, y >= h - B
+        if on_l or on_r:                 # 侧边上靠近角的 14px 也算角
+            if y < C:
+                on_t = True
+            elif y >= h - C:
+                on_b = True
+        if on_t or on_b:                 # 顶/底边上靠近角的 14px 也算角
+            if x < C:
+                on_l = True
+            elif x >= w - C:
+                on_r = True
+        hx = -1 if on_l else (1 if on_r else 0)
+        hy = -1 if on_t else (1 if on_b else 0)
+        return (hx, hy) if (hx or hy) else None
+
+    def _edge_motion(self, e):
+        if not self._borderless:
+            return
+        if self._is_zoomed():            # 最大化不可缩放，恢复默认光标
+            self._edge.config(cursor="")
+            return
+        d = self._edge_dir(e.x, e.y, self._edge.winfo_width(),
+                           self._edge.winfo_height())
+        self._edge.config(cursor=self._RESIZE_CURSOR.get(d, ""))
+
+    def _edge_leave(self, _e):
+        self._edge.config(cursor="")
+
+    def _edge_press(self, e):
+        if not self._borderless or self._is_zoomed():
+            return
+        d = self._edge_dir(e.x, e.y, self._edge.winfo_width(),
+                           self._edge.winfo_height())
+        if d:
+            try:
+                _x11_wm_moveresize(self.root, e.x_root, e.y_root,
+                                   self._RESIZE_DIR[d])
+            except Exception:
+                pass
 
     # ---------------- 通道管理（多通道并存：协议 + 本地端口） ----------------
 
