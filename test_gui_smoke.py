@@ -197,6 +197,7 @@ def phase5b():
     gui._toggle_loop()
     assert gui._loop_ckey == PEER, "循环应锁定启动时的会话"
     gui._select_convo(TCP_CKEY)
+    gui._card_snapshot = gui._cards[PEER]   # 未读刷新不应重建卡片控件
     root.after(350, phase5c)
 
 
@@ -207,6 +208,8 @@ def phase5c():
     assert gui._cstats[PEER][1] >= 3, \
         f"循环包应发往锁定的 PEER: {gui._cstats[PEER]}"
     assert gui._cstats[TCP_CKEY][1] == TCP_TX0, "切走后 TCP 会话不应收到循环包"
+    assert gui._cards[PEER] is gui._card_snapshot, \
+        "未读角标刷新不应重建卡片控件（闪烁回归）"
     # 循环期间当前是 TCP 会话，PEER 的未读应显示在红色角标上
     # （用 winfo_manager 而非 winfo_ismapped：刚重建的卡片要等下一轮事件循环才绘制）
     badge = gui._cards[PEER]._badge

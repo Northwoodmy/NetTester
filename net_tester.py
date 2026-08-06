@@ -590,6 +590,10 @@ class NetTesterGUI:
         # 左栏：会话卡片列表 + 发起新会话按钮（类微信）
         contact_col = ttk.Frame(main)
         contact_col.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 6))
+        # 按钮先按底打包，固定在左栏底部；卡片列表填充剩余空间
+        ttk.Button(contact_col, text="＋ 发起新会话", style="Accent.TButton",
+                   command=self._show_new_session_dialog).pack(
+            side=tk.BOTTOM, fill=tk.X, pady=(4, 0))
         # Canvas + 内嵌 Frame 实现可滚动的卡片列
         self.contact_canvas = tk.Canvas(contact_col, width=180,
                                         bg=PALETTE["surface"],
@@ -612,9 +616,6 @@ class NetTesterGUI:
         self._f_badge = tkfont.Font(family=self._ui_font, size=8, weight="bold")
         for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             self.contact_canvas.bind(seq, self._on_cards_wheel)
-        ttk.Button(contact_col, text="＋ 发起新会话", style="Accent.TButton",
-                   command=self._show_new_session_dialog).pack(fill=tk.X,
-                                                               pady=(4, 0))
         ttk.Separator(main, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y,
                                                      padx=(0, 6))
 
@@ -1058,19 +1059,50 @@ class NetTesterGUI:
             self.contact_canvas.config(width=width)
 
     def _refresh_contacts(self):
-        """重建会话卡片，并同步聊天区标题。"""
+        """刷新会话卡片：只有会话增删/顺序变化才整体重建；
+        未读数、选中态、关闭态等变化逐张原地更新，避免整列闪烁。"""
         keys = self._all_convo_keys()
-        self._convo_keys = keys
-        for w in self.cards_frame.winfo_children():
-            w.destroy()
-        self._cards = {}
+        if keys != self._convo_keys:
+            for w in self.cards_frame.winfo_children():
+                w.destroy()
+            self._cards = {k: self._build_card(k) for k in keys}
+            self._convo_keys = keys
         for k in keys:
-            self._cards[k] = self._build_card(k)
+            self._update_card(k)
         self._fit_card_width()
         if self.current_peer in keys:
             self.convo_title.config(text=self._display(self.current_peer))
         else:
             self.convo_title.config(text="未选择会话（点击 ＋发起新会话 开始）")
+
+    def _update_card(self, ckey: str):
+        """原地刷新一张卡片的两行文本、未读角标与配色（不重建控件）。"""
+        card = self._cards.get(ckey)
+        if card is None:
+            return
+        line1, line2 = self._card_lines(ckey)
+        if card._l1.cget("text") != line1:
+            card._l1.config(text=line1)
+        if card._l2.cget("text") != line2:
+            card._l2.config(text=line2)
+        closed = self._chan_of(ckey) not in self.channels
+        card._l1.config(fg=PALETTE["subtle"] if closed else PALETTE["fg"])
+        card._l2.config(fg=PALETTE["disabled_fg"] if closed
+                        else PALETTE["subtle"])
+        n = self._unread.get(ckey, 0)
+        badge = card._badge
+        if n:
+            txt = str(n if n <= 99 else "99+")
+            if badge.cget("text") != txt:
+                badge.config(text=txt)
+            if badge.winfo_manager() != "pack":
+                badge.pack(side=tk.RIGHT)
+        elif badge.winfo_manager() == "pack":
+            badge.pack_forget()
+        selected = ckey == self.current_peer
+        if card._selected != selected:
+            card._selected = selected
+            self._card_paint(card, PALETTE["select"] if selected else "#FFFFFF")
 
     def _build_card(self, ckey: str) -> tk.Frame:
         """一张会话卡片：第一行对端地址+红色未读角标，第二行本机通道。"""
@@ -1102,7 +1134,9 @@ class NetTesterGUI:
         l2.pack(fill=tk.X, padx=8, pady=(0, 6))
 
         card._selected = selected
-        card._badge = badge                 # 测试与悬停重绘用
+        card._badge = badge                 # 测试与原地更新用
+        card._l1 = l1
+        card._l2 = l2
         card._paintables = (card, top, l1, l2)
         for w in (card, top, l1, l2, badge):
             w.bind("<Button-1>", lambda _e, k=ckey: self._select_convo(k))
