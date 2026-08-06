@@ -1156,14 +1156,11 @@ class NetTesterGUI:
         return line1, line2
 
     def _fit_card_width(self):
-        """卡片列宽度按最长内容自适应（实测两行文本像素宽）。"""
-        widest = 0
-        for k in self._convo_keys:
-            l1, l2 = self._card_lines(k)
-            badge_px = 42 if self._unread.get(k) else 0   # 角标最宽 "9999+"
-            widest = max(widest, self._f_card1.measure(l1) + badge_px,
-                         self._f_card2.measure(l2))
-        width = max(180, min(340, widest + 16 + 10))  # 卡片内边距 + 栏内边距
+        """卡片列宽度按内容自适应：读取卡片框架的实际需求宽度
+        （含两行文本、角标、内边距，比字体测量估算可靠），夹在 [180, 340]。"""
+        self.cards_frame.update_idletasks()
+        req = self.cards_frame.winfo_reqwidth()
+        width = max(180, min(340, req + 2))
         if width != int(self.contact_canvas.cget("width")):
             self.contact_canvas.config(width=width)
 
