@@ -38,7 +38,7 @@ UDP_MAX_PAYLOAD = 65507          # UDP 数据报最大载荷
 RECV_BUF = 65536
 MAX_RX_LINES = 2000              # 接收区最大行数，超出裁剪
 MAX_CONVO_MSGS = 2000            # 每个会话最多保存的消息条数
-VERSION = "2.2.7"                # 与 release tag 对应，发版时同步递增
+VERSION = "2.2.8"                # 与 release tag 对应，发版时同步递增
 MONO_FONT = "Consolas" if sys.platform == "win32" else "Monospace"
 IS_WIN = sys.platform == "win32"
 
@@ -1328,11 +1328,18 @@ class NetTesterGUI:
         return {"udp": f"UDP·{p}", "tcps": f"TCP·{p}", "tcpc": "TCP"}[proto]
 
     @staticmethod
+    def _conn_no(cid: str) -> str:
+        """tcpc 并行连接的展示序号：cid 端口段带 #n 时返回 ' #n'，否则空串。"""
+        if cid.startswith("tcpc:") and "#" in cid:
+            return " #" + cid.rsplit("#", 1)[1]
+        return ""
+
+    @staticmethod
     def _chan_disp(cid: str) -> str:
-        """通道的展示名：UDP·50021 / TCP·9000 / TCP→host:port。"""
+        """通道的展示名：UDP·50021 / TCP·9000 / TCP→host:port（并行连接加 #n）。"""
         proto, h, p = cid.split(":", 2)
         if proto == "tcpc":
-            return f"TCP→{h}:{p}"
+            return f"TCP→{h}:{p.split('#', 1)[0]}" + NetTesterGUI._conn_no(cid)
         return f"{'UDP' if proto == 'udp' else 'TCP'}·{p}"
 
     @staticmethod
@@ -1344,12 +1351,13 @@ class NetTesterGUI:
         return ckey.rsplit("|", 1)[0]
 
     def _display(self, ckey: str) -> str:
-        """联系人显示名：对端 [协议·端口]；通道已关闭则标注。"""
+        """联系人显示名：对端 [协议·端口]；并行连接加 #n，通道已关闭则标注。"""
         cid, peer = ckey.rsplit("|", 1)
         tag = self._cid_tag(cid)
         if cid not in self.channels:
             tag += "·已关闭"
-        return f"（群发）[{tag}]" if peer == "*" else f"{peer} [{tag}]"
+        return (f"（群发）[{tag}]" if peer == "*"
+                else f"{peer}{self._conn_no(cid)} [{tag}]")
 
     # ---------------- 发起新会话（对话框：协议 + 地址 + 端口） ----------------
 
@@ -1546,7 +1554,7 @@ class NetTesterGUI:
         w = self.channels.get(cid)
         if w is None or peer == "*":
             return
-        # tcpc 通道固定只有一条连接：断的是最后一条就连通道一起收掉
+        # tcpc 一条连接一个通道（并行连接各有独立通道）：断它就连通道一起收掉
         last_one = isinstance(w, TCPClientWorker) and w.conn_keys() == [peer]
         w.disconnect(peer)
         if last_one:
@@ -1555,10 +1563,10 @@ class NetTesterGUI:
         self._log_event(f"--- 连接已断开 {peer} ---")
 
     def _reconnect_peer(self, ckey: str):
-        """TCP Client 会话断线后重新拨号。"""
-        _cid, peer = ckey.rsplit("|", 1)
+        """TCP Client 会话断线后重新拨号（沿用原通道 id，回到原卡片）。"""
+        cid, peer = ckey.rsplit("|", 1)
         host, port = peer.rsplit(":", 1)
-        new_key = self._connect_tcp_client(host, int(port))
+        new_key = self._connect_tcp_client(host, int(port), cid=cid)
         if new_key:
             self._select_convo(new_key)
 
@@ -1566,7 +1574,9 @@ class NetTesterGUI:
         """重开已关闭的通道：UDP/TCP 监听按原地址绑定，TCP 连接重新拨号。"""
         proto, host, port = cid.split(":", 2)
         if proto == "tcpc":
-            ckey = self._connect_tcp_client(host, int(port))
+            # 并行连接的 cid 端口段带 #n 后缀（tcpc:h:5000#2），拨号前要剥掉
+            ckey = self._connect_tcp_client(host, int(port.split("#", 1)[0]),
+                                            cid=cid)
             if ckey:
                 self._select_convo(ckey)
         else:
@@ -1647,9 +1657,19 @@ class NetTesterGUI:
         for cid in list(self.channels):
             self._close_channel(cid)
 
-    def _connect_tcp_client(self, host: str, port: int):
-        """建立（或复用）到 host:port 的 TCP 通道并连接；成功返回会话 key。"""
-        cid = self._cid("tcpc", host, port)
+    def _connect_tcp_client(self, host: str, port: int, cid: str = None):
+        """建立到 host:port 的 TCP 客户端连接；每次新拨号都是独立通道。
+
+        cid 为 None（新拨号）时分配唯一通道 id：首个连接用 tcpc:host:port，
+        并行第 n 个用 tcpc:host:port#n——同目标多客户端互不干扰。
+        传入 cid（断线重连/重开通道）则沿用原 id，会话卡片与聊天记录延续。
+        成功返回会话 key。"""
+        if cid is None:
+            base = self._cid("tcpc", host, port)
+            cid, n = base, 2
+            while cid in self.channels:
+                cid = f"{base}#{n}"
+                n += 1
         w = self.channels.get(cid)
         if w is None:
             w = TCPClientWorker(lambda s, d, c=cid: self._q_data(c, s, d),
@@ -1702,7 +1722,8 @@ class NetTesterGUI:
         """卡片两行文本：第一行对端地址，第二行本机通道说明。"""
         cid, peer = ckey.rsplit("|", 1)
         proto, _h, p = cid.split(":", 2)
-        line1 = "（群发）" if peer == "*" else peer
+        # tcpc 并行连接靠 _conn_no 的 #n 序号区分（同目标卡片对端地址相同）
+        line1 = "（群发）" if peer == "*" else peer + self._conn_no(cid)
         if proto == "udp":
             line2 = f"本机 UDP·{p}"
         elif proto == "tcps":

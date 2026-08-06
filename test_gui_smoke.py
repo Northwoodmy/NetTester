@@ -4,7 +4,7 @@
 
 流程：对话框开合 -> UDP 建会话自发自收 -> 逗号分隔多目标 -> 通道内群发 ->
 忽略本机来源 -> 第二个 UDP 通道（不同端口）-> TCP Client 会话并存 ->
-关闭全部（已关闭标注 + 删除会话记录）-> 重开恢复。
+关闭全部（已关闭标注 + 删除会话记录）-> 重开恢复 -> 同目标并行 TCP 客户端。
 """
 
 import os
@@ -260,9 +260,51 @@ def phase6():
     gui._reconnect_peer(TCP_CKEY)
     assert tcp_cid in gui.channels and gui.current_peer == TCP_CKEY, \
         "重新连接失败"
+    # —— 同一服务器的第二个并行 TCP 客户端：独立通道/卡片 ——
+    assert gui._create_session("tcpc", "", "", "127.0.0.1", str(ECHO_PORT)), \
+        "第二个并行 TCP 客户端创建失败"
+    cid2 = f"tcpc:127.0.0.1:{ECHO_PORT}#2"
+    ckey2 = f"{cid2}|127.0.0.1:{ECHO_PORT}"
+    assert cid2 in gui.channels and tcp_cid in gui.channels, \
+        f"两个并行 TCP 通道应并存: {list(gui.channels)}"
+    assert gui.current_peer == ckey2, f"应选中新并行会话: {gui.current_peer}"
+    # 同目标卡片的区分靠第一行的 #n 序号
+    assert gui._card_lines(ckey2)[0] == f"127.0.0.1:{ECHO_PORT} #2", \
+        f"并行连接卡片应带序号: {gui._card_lines(ckey2)}"
+    assert " #2" in gui._display(ckey2), "显示名应带 #2 序号"
+    # 向 #2 发送，echo 只应回到 #2 自己的会话
+    gui.tx_hex_var.set(False)
+    gui.tx_text.delete("1.0", tk.END)
+    gui.tx_text.insert("1.0", "via-conn2")
+    root.after(200, lambda: gui._send(random_pkt=False))
+    root.after(700, phase7)
+
+
+def phase7():
+    tcp_cid = f"tcpc:127.0.0.1:{ECHO_PORT}"
+    cid2 = f"tcpc:127.0.0.1:{ECHO_PORT}#2"
+    ckey2 = f"{cid2}|127.0.0.1:{ECHO_PORT}"
+    rx2 = b"".join(d for dr, d, _ in gui._convos[ckey2] if dr == "rx")
+    assert b"echo:via-conn2" in rx2, f"#2 会话应收到自己的 echo: {rx2!r}"
+    rx1 = b"".join(d for dr, d, _ in gui._convos[TCP_CKEY] if dr == "rx")
+    assert b"via-conn2" not in rx1, "#2 的流量不应串到首个连接"
+    # 断开 #2：只收掉 #2 自己的通道，首个连接不受影响
+    gui._disconnect_peer(ckey2)
+    assert cid2 not in gui.channels and tcp_cid in gui.channels, \
+        "断开 #2 不应影响首个连接"
+    assert "已关闭" in gui._card_lines(ckey2)[1], "#2 断开后卡片应标注已关闭"
+    # 重开 #2 通道：沿用 #2 id 回到原卡片，聊天记录延续
+    gui._reopen_channel(cid2)
+    assert cid2 in gui.channels and gui.current_peer == ckey2, "重开 #2 失败"
+    assert gui._convos[ckey2], "重开后原聊天记录应保留"
+    # 再断开，改走「重新连接」：同样回到原卡片
+    gui._disconnect_peer(ckey2)
+    gui._reconnect_peer(ckey2)
+    assert cid2 in gui.channels and gui.current_peer == ckey2, "#2 重连失败"
     gui._close_all_channels()
     root.destroy()
-    print("GUI 冒烟测试通过（对话框/多通道/多协议/群发/忽略本机/删除会话）")
+    print("GUI 冒烟测试通过（对话框/多通道/多协议/群发/忽略本机/删除会话"
+          "/并行TCP客户端）")
 
 
 root.after(1500, phase2)
