@@ -778,6 +778,7 @@ def _win32_native_borderless(root):
     set_style(hwnd, GWL_STYLE, style)
     u32.SetWindowPos(ctypes.c_void_p(hwnd), 0, 0, 0, 0, 0,
                      0x0001 | 0x0002 | 0x0004 | 0x0020)  # NOSIZE|NOMOVE|NOZORDER|FRAMECHANGED
+    return hwnd
 
 
 def _seg_d2(px, py, ax, ay, bx, by):
@@ -1080,7 +1081,7 @@ class NetTesterGUI:
         映射后才能设（见 __init__ 里的注释）。"""
         try:
             if IS_WIN:
-                _win32_native_borderless(self.root)
+                self._hwnd = _win32_native_borderless(self.root)
             else:
                 _x11_lib()
             self._borderless = True
@@ -1204,15 +1205,24 @@ class NetTesterGUI:
             self._sync_max_icon()
 
     def _tb_press(self, e):
-        """标题栏按下：Linux 让 WM 从指针位置原生拖动（direction 8=移动，
-        与系统标题栏手感一致）；Windows 记录起点，<B1-Motion> 手动拖。"""
+        """标题栏按下：拖动交给系统原生移动循环——Linux 发
+        _NET_WM_MOVERESIZE（direction 8=移动），Windows 在
+        ReleaseCapture 后发 WM_NCLBUTTONDOWN/HTCAPTION 进入系统移动
+        模态循环（还自带拖到顶部最大化/贴边平铺）。手动逐帧改
+        geometry 会堆积鼠标事件、刷新跟不上（拖动残影），仅作兜底。"""
         if IS_WIN:
-            if self.root.state() == "zoomed":
-                self._tb_drag_start = None      # 最大化时不拖，先点还原
-            else:
-                self._tb_drag_start = (e.x_root, e.y_root,
-                                       self.root.winfo_x(),
-                                       self.root.winfo_y())
+            self._tb_drag_start = None
+            try:
+                hwnd = getattr(self, "_hwnd", None) or \
+                    int(self.root.wm_frame(), 16)
+                u32 = ctypes.windll.user32
+                u32.ReleaseCapture()
+                u32.SendMessageW(ctypes.c_void_p(hwnd), 0x00A1, 2, 0)
+            except Exception:
+                if self.root.state() != "zoomed":       # 失败退回手动拖
+                    self._tb_drag_start = (e.x_root, e.y_root,
+                                           self.root.winfo_x(),
+                                           self.root.winfo_y())
         else:
             try:
                 _x11_wm_moveresize(self.root, e.x_root, e.y_root, 8)
