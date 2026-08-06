@@ -598,10 +598,10 @@ class NetTesterGUI:
         self.contact_canvas = tk.Canvas(contact_col, width=180,
                                         bg=PALETTE["surface"],
                                         highlightthickness=0)
-        cards_scroll = ttk.Scrollbar(contact_col, orient=tk.VERTICAL,
-                                     command=self.contact_canvas.yview)
-        self.contact_canvas.configure(yscrollcommand=cards_scroll.set)
-        cards_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._cards_scroll = ttk.Scrollbar(contact_col, orient=tk.VERTICAL,
+                                           command=self.contact_canvas.yview)
+        # 滚动条按需显示：内容不足一屏时隐藏（yscrollcommand 回包可见比例）
+        self.contact_canvas.configure(yscrollcommand=self._on_cards_scroll)
         self.contact_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.cards_frame = tk.Frame(self.contact_canvas, bg=PALETTE["surface"])
         self._cards_window = self.contact_canvas.create_window(
@@ -1030,6 +1030,14 @@ class NetTesterGUI:
             if not k.endswith("|*") and k not in keys:
                 keys.append(k)
         return keys
+
+    def _on_cards_scroll(self, first: str, last: str):
+        """滚动条按需显示：可见比例不足全量（内容超出）时才占位。"""
+        if float(last) - float(first) >= 0.999:
+            self._cards_scroll.pack_forget()
+        elif self._cards_scroll.winfo_manager() != "pack":
+            self._cards_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._cards_scroll.set(first, last)
 
     def _card_lines(self, ckey: str):
         """卡片两行文本：第一行对端地址，第二行本机通道说明。"""
