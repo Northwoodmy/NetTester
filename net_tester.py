@@ -425,7 +425,7 @@ def apply_modern_theme(root):
 
     s.configure(".", background=p["bg"], foreground=p["fg"],
                 fieldbackground=p["field"], bordercolor=p["bg"],
-                troughcolor=p["surface"], focuscolor=p["accent"])
+                troughcolor=p["surface"], focuscolor=p["bg"])
     s.configure("TFrame", background=p["bg"])
     s.configure("TLabel", background=p["bg"], foreground=p["fg"])
 
@@ -459,14 +459,14 @@ def apply_modern_theme(root):
           background=[("active", p["green_hi"]), ("pressed", p["green_press"]),
                       ("disabled", p["disabled_bg"])],
           foreground=[("disabled", p["disabled_fg"])])
-    # 输入框：Material 文本框 —— 白底灰描边，聚焦描边变蓝
+    # 输入框：Material 文本框 —— 白底灰描边，聚焦不变色（无焦点蓝框）
     s.configure("TEntry", fieldbackground=p["field"], foreground=p["fg"],
                 insertcolor=p["fg"], bordercolor=p["border"],
                 lightcolor=p["field"], darkcolor=p["field"], padding=6)
     s.map("TEntry",
           fieldbackground=[("disabled", p["disabled_bg"])],
           foreground=[("disabled", p["disabled_fg"])],
-          bordercolor=[("focus", p["accent"]), ("active", p["subtle"])])
+          bordercolor=[("active", p["subtle"])])
     # 下拉框：白底 + 箭头悬停加深，文字与箭头间留白
     s.configure("TCombobox", fieldbackground=p["field"], foreground=p["fg"],
                 background=p["field"], arrowcolor=p["subtle"], arrowsize=13,
@@ -475,7 +475,7 @@ def apply_modern_theme(root):
     s.map("TCombobox",
           fieldbackground=[("readonly", p["field"]), ("disabled", p["disabled_bg"])],
           foreground=[("readonly", p["fg"]), ("disabled", p["disabled_fg"])],
-          bordercolor=[("focus", p["accent"]), ("active", p["subtle"])],
+          bordercolor=[("active", p["subtle"])],
           arrowcolor=[("active", p["fg"]), ("disabled", p["disabled_fg"])])
     # 下拉弹层：扁平无描边，选中项浅蓝底深蓝字，无虚线框
     root.option_add("*TCombobox*Listbox.background", p["field"])
@@ -523,7 +523,7 @@ def apply_modern_theme(root):
 TEXT_STYLE = dict(bg="#FFFFFF", fg="#202124", insertbackground="#202124",
                   selectbackground="#D2E3FC", relief="flat", padx=8, pady=6,
                   highlightthickness=1, highlightbackground="#DADCE0",
-                  highlightcolor="#1A73E8")
+                  highlightcolor="#DADCE0")   # 焦点不变色：不要蓝色焦点框
 
 
 # ---------------------------------------------------------------------------
@@ -596,7 +596,7 @@ class NetTesterGUI:
             selectforeground=PALETTE["accent_press"],
             relief="flat", highlightthickness=1,
             highlightbackground=PALETTE["border"],
-            highlightcolor=PALETTE["accent"],
+            highlightcolor=PALETTE["border"],   # 焦点不变色：不要蓝色焦点框
             activestyle="none", exportselection=False)
         self.contact_list.pack(fill=tk.BOTH, expand=True)
         self.contact_list.bind("<<ListboxSelect>>", self._on_contact_pick)
