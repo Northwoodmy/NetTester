@@ -812,6 +812,14 @@ class NetTesterGUI:
             **{**TEXT_STYLE, "bg": "#F5F5F5"})
         self.rx_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self._rx_scroll.config(command=self.rx_text.yview)
+        # —— 拖标题栏导致 Tk 文本自动滚动卡死的防护（详见看门狗注释）——
+        # 这里只被动记录文本区内是否发生过真实的 <1> 按下；不加 break，
+        # 类绑定（TextButton1/CancelRepeat）照常执行。
+        self._rx_b1_held = False
+        self._rx_as_streak = 0      # 连续“卡死”判定次数（防误杀合法拖选）
+        self._rx_as_prev = None     # 上次采样：(物理指针x,y, Priv.x,Priv.y)
+        self.rx_text.bind("<1>", self._rx_b1_down, add="+")
+        self.rx_text.bind("<ButtonRelease-1>", self._rx_b1_up, add="+")
         t = self.rx_text
         # 气泡：收到=左白，发出=右绿（微信配色）；meta=灰小字；sys=居中灰字
         t.tag_configure("rx", background="#FFFFFF", lmargin1=6, lmargin2=6,
@@ -1407,6 +1415,7 @@ class NetTesterGUI:
             self._local_ips = set(detect_local_ips()) | {"127.0.0.1"}
 
     def _poll_queue(self):
+        self._rx_autoscroll_watchdog()   # 先解卡死的自动滚动，再收包钉底
         appends = []                   # 批量渲染，每 50ms 只刷一次，抗高包速
         contacts_dirty = False         # 卡片重建较重，本批结束后只刷一次
         try:
@@ -1482,6 +1491,90 @@ class NetTesterGUI:
             w.insert(tk.END, self._fmt_body(data), "rx")
         w.insert(tk.END, "\n\n")
 
+    def _rx_b1_down(self, _e):
+        self._rx_b1_held = True
+
+    def _rx_b1_up(self, _e):
+        self._rx_b1_held = False
+
+    def _rx_autoscroll_active(self) -> bool:
+        """接收区自己的 TextAutoScan（50ms 自续滚动定时器）是否在跑。
+        tk::Priv 是解释器级共享的，发送框的拖选自动滚动也会置位
+        afterId——用 after info 取出定时器脚本里的控件路径来区分。"""
+        try:
+            armed = self.root.tk.eval(
+                "expr {[info exists ::tk::Priv(afterId)] "
+                "&& $::tk::Priv(afterId) ne {} "
+                "? [lindex [lindex [after info $::tk::Priv(afterId)] 0] end]"
+                " : {}}")
+        except tk.TclError:
+            return False
+        return armed == str(self.rx_text)
+
+    def _rx_autoscroll_watchdog(self):
+        """取消卡死的 TextAutoScan——接收区 IP 行闪动的根因。
+
+        TextAutoScan 是 Tk 文本类绑定的“按住左键拖出窗口边缘就自动滚动”
+        机制：<B1-Leave> 武装一个 50ms 自续定时器，每拍按 Priv(y) 滚动
+        （指针在窗口上方则上滚 (-1+y) 像素）并用 TextSelectTo 把 insert
+        钉到指针处（= 顶行）；正常由 <ButtonRelease-1>/<B1-Enter> 的
+        tk::CancelRepeat 解除。
+
+        卡死路径：按住**标题栏**拖窗口时，窗口相对指针移动，指针可能从
+        文本区上缘掠过——<B1-Leave> 据此武装 AutoScan；但按钮的
+        press/release 都归 WM 所有，文本框永远收不到 release，
+        CancelRepeat 不执行 → 定时器永久卡死，每拍上滚约一个窗口高，
+        与收包后的钉底互相拉扯 = IP 行在两个位置间交替重绘（闪动）。
+        在文本区里点一下（真实 press+release 走一遍 CancelRepeat）或
+        再次拖到指针重新进入文本区（B1-Enter）即恢复——与现象吻合。
+
+        判据（满足其一即视为卡死，连续两拍确认后取消）：
+        1) 我们没见到文本区内的 <1> 按下——武装来源只可能是标题栏拖动；
+        2) 见过按下但物理指针在动而 Tk 记录的 Priv(x/y) 冻结——隐式抓取
+           已丢（release 丢失），按住是假象。
+        """
+        if not self._rx_autoscroll_active():
+            self._rx_as_streak = 0
+            self._rx_as_prev = None
+            return
+        w = self.rx_text
+        px = self.root.winfo_pointerx() - w.winfo_rootx()
+        py = self.root.winfo_pointery() - w.winfo_rooty()
+        try:
+            privx = int(self.root.tk.eval(
+                "expr {[info exists ::tk::Priv(x)] ? $::tk::Priv(x) : -99999}"))
+            privy = int(self.root.tk.eval(
+                "expr {[info exists ::tk::Priv(y)] ? $::tk::Priv(y) : -99999}"))
+        except (tk.TclError, ValueError):
+            privx = privy = -99999
+        prev = self._rx_as_prev
+        self._rx_as_prev = (px, py, privx, privy)
+        stale = not self._rx_b1_held
+        if not stale and prev is not None:
+            stale = (px, py) != (prev[0], prev[1]) and \
+                    (privx, privy) == (prev[2], prev[3])
+        self._rx_as_streak = self._rx_as_streak + 1 if stale else 0
+        if self._rx_as_streak >= 2:
+            self._rx_as_streak = 0
+            try:
+                self.root.tk.eval("tk::CancelRepeat")
+            except tk.TclError:
+                pass
+            self._pin_bottom()      # 把被扯走的视图拉回钉底位置
+
+    def _pin_bottom(self):
+        """钉住聊天区底部。不要用 see(END)：它的“接近则锚底、否则居中”
+        分支以窗口高度的 1/3 为界——当每条消息的像素高度恰好超过该阈值
+        时（与窗口高、内容折行有关，拖动窗口会改变这个关系），see 会把
+        末行放到窗口中部，底部留白又触发控件重绘时的上拉校正，两个位置
+        交替绘制 = 底部内容（来源 IP 行）与上一条消息重叠闪动。
+        moveto(1.0) 无条件定位到内容末尾，重绘的空白填充校正只会把
+        视图补齐到底部这一个确定位置，振荡在结构上不存在。
+        自动滚动（拖选/卡死的 AutoScan）活动期间不钉底，由看门狗处理。"""
+        if self._rx_autoscroll_active():
+            return
+        self.rx_text.yview_moveto(1.0)
+
     def _append_msgs(self, items):
         """items: ('msg', direction, peer, data, t) 或 ('sys', text)。"""
         w = self.rx_text
@@ -1493,7 +1586,7 @@ class NetTesterGUI:
                 self._insert_msg(it[1], it[2], it[3], it[4])
         if int(w.index("end-1c").split(".")[0]) > MAX_RX_LINES:
             w.delete("1.0", f"{MAX_RX_LINES // 2}.0")
-        w.see(tk.END)
+        self._pin_bottom()
         w.config(state=tk.DISABLED)
 
     def _render_chat(self, peer: str):
@@ -1502,7 +1595,7 @@ class NetTesterGUI:
         w.delete("1.0", tk.END)
         for direction, data, t in self._convos.get(peer, []):
             self._insert_msg(direction, peer, data, t)
-        w.see(tk.END)
+        self._pin_bottom()
         w.config(state=tk.DISABLED)
 
     def _rerender(self):
