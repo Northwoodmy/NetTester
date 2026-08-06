@@ -900,7 +900,13 @@ class NetTesterGUI:
         """右键会话卡片：关闭所在通道 / 删除会话记录。"""
         self._select_convo(ckey)
         cid = self._chan_of(ckey)
-        menu = tk.Menu(self.root, tearoff=0)
+        menu = tk.Menu(self.root, tearoff=0, bd=0, relief=tk.FLAT,
+                       bg="#FFFFFF", fg=PALETTE["fg"],
+                       activebackground=PALETTE["select"],
+                       activeforeground=PALETTE["accent_press"],
+                       disabledforeground=PALETTE["disabled_fg"],
+                       activeborderwidth=0,
+                       font=(self._ui_font, 10))
         if cid in self.channels:
             menu.add_command(label=f"关闭通道 {self._cid_tag(cid)}",
                              command=lambda: self._close_channel(cid))
@@ -908,10 +914,9 @@ class NetTesterGUI:
             menu.add_command(label="通道已关闭", state=tk.DISABLED)
         menu.add_command(label="删除会话记录",
                          command=lambda: self._delete_convo(ckey))
-        try:
-            menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            menu.grab_release()
+        # 不要在这里 grab_release：tk_popup 的全局抓取会把「点击菜单外部」
+        # 路由给菜单从而自动关闭；立即释放抓取会导致菜单点不掉
+        menu.tk_popup(event.x_root, event.y_root)
 
     def _delete_convo(self, ckey: str):
         """删除会话记录：清聊天记录并从列表移除（不影响通道）。"""
